@@ -503,7 +503,7 @@ if __name__ == "__main__":
             "image_logger": {
                 "target": "main.ImageLogger",
                 "params": {
-                    "batch_frequency": 750,
+                    "batch_frequency": 100,
                     "max_images": 4,
                     "clamp": True
                 }
@@ -520,7 +520,7 @@ if __name__ == "__main__":
         callbacks_cfg = OmegaConf.merge(default_callbacks_cfg, callbacks_cfg)
         trainer_kwargs["callbacks"] = [instantiate_from_config(callbacks_cfg[k]) for k in callbacks_cfg]
 
-        trainer = Trainer.from_argparse_args(trainer_opt, **trainer_kwargs)
+        trainer = Trainer.from_argparse_args(trainer_opt, **trainer_kwargs,num_sanity_val_steps=0, max_epochs=1000, limit_train_batches=10, limit_val_batches=4)
 
         # data
         data = instantiate_from_config(config.data)
