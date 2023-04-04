@@ -1,7 +1,7 @@
 #!/bin/bash
-mkdir -r data/coco 
-mkdir -r data/cocostuffthings
-mkdir  logs #存储运行日志
+mkdir data/coco 
+mkdir data/cocostuffthings
+mkdir logs #存储运行日志
 
 wget http://images.cocodataset.org/zips/train2017.zip
 wget http://images.cocodataset.org/zips/val2017.zip
