@@ -210,7 +210,7 @@ class GumbelQuantize(nn.Module):
         return z_q
 
 
-class VectorQuantizer2(nn.Module):
+class VectorQuantizer2(nn.Module):          #VectorQuantizer 改进的版本
     """
     Improved version over VectorQuantizer, can be used as a drop-in replacement. Mostly
     avoids costly matrix multiplications and allows for post-hoc remapping of indices.
@@ -268,50 +268,75 @@ class VectorQuantizer2(nn.Module):
         back=torch.gather(used[None,:][inds.shape[0]*[0],:], 1, inds)
         return back.reshape(ishape)
 
-    def forward(self, z, temp=None, rescale_logits=False, return_logits=False):
+    def forward(self, z, temp=None, rescale_logits=False, return_logits=False, key=None):
         assert temp is None or temp==1.0, "Only for interface compatible with Gumbel"
         assert rescale_logits==False, "Only for interface compatible with Gumbel"
         assert return_logits==False, "Only for interface compatible with Gumbel"
-        # reshape z -> (batch, height, width, channel) and flatten
-        z = rearrange(z, 'b c h w -> b h w c').contiguous()
-        z_flattened = z.view(-1, self.e_dim)
-        # distances from z to embeddings e_j (z - e)^2 = z^2 + e^2 - 2 e * z
+        if key == 'text':
+            z = z.contiguous()                                  # [8, 256, 256]
+            z_flattened = z.view(-1, self.e_dim)                # [2048, 256]
 
-        d = torch.sum(z_flattened ** 2, dim=1, keepdim=True) + \
-            torch.sum(self.embedding.weight**2, dim=1) - 2 * \
-            torch.einsum('bd,dn->bn', z_flattened, rearrange(self.embedding.weight, 'n d -> d n'))
+            d = torch.sum(z_flattened**2, dim=1, keepdim=True) + \
+                torch.sum(self.embedding.weight**2, dim=1) - \
+                2*(torch.matmul(z_flattened, self.embedding.weight.t()))                    # [2048, 8912]
 
-        min_encoding_indices = torch.argmin(d, dim=1)
-        z_q = self.embedding(min_encoding_indices).view(z.shape)
-        perplexity = None
-        min_encodings = None
+            codebook_indices = torch.argmin(d, dim=1)
+            z_q = self.embedding(codebook_indices).view(z.shape)                            # [8, 256, 256]
 
-        # compute loss for embedding
-        if not self.legacy:
-            loss = self.beta * torch.mean((z_q.detach()-z)**2) + \
-                   torch.mean((z_q - z.detach()) ** 2)
-        else:
-            loss = torch.mean((z_q.detach()-z)**2) + self.beta * \
-                   torch.mean((z_q - z.detach()) ** 2)
+            loss = torch.mean((z_q.detach() - z)**2) #+ self.beta * torch.mean((z_q - z.detach())**2)
 
-        # preserve gradients
-        z_q = z + (z_q - z).detach()
+            z_q = z + (z_q - z).detach()
 
-        # reshape back to match original input shape
-        z_q = rearrange(z_q, 'b h w c -> b c h w').contiguous()
 
-        if self.remap is not None:
-            min_encoding_indices = min_encoding_indices.reshape(z.shape[0],-1) # add batch axis
-            min_encoding_indices = self.remap_to_used(min_encoding_indices)
-            min_encoding_indices = min_encoding_indices.reshape(-1,1) # flatten
 
-        if self.sane_index_shape:
-            min_encoding_indices = min_encoding_indices.reshape(
-                z_q.shape[0], z_q.shape[2], z_q.shape[3])
+            return z_q, loss, codebook_indices
 
-        return z_q, loss, (perplexity, min_encodings, min_encoding_indices)
 
-    def get_codebook_entry(self, indices, shape):
+        elif key == 'image':
+            # reshape z -> (batch, height, width, channel) and flatten
+            z = rearrange(z, 'b c h w -> b h w c').contiguous()         # [8, 256, 16, 16]->[8, 16, 16, 256]
+            z_flattened = z.view(-1, self.e_dim)                        # [2048, 256]
+
+            # distances from z to embeddings e_j (z - e)^2 = z^2 + e^2 - 2 e * z
+            d = torch.sum(z_flattened ** 2, dim=1, keepdim=True) + \
+                torch.sum(self.embedding.weight**2, dim=1) - 2 * \
+                torch.einsum('bd,dn->bn', z_flattened, rearrange(self.embedding.weight, 'n d -> d n'))      #[2048, 8192]
+
+            min_encoding_indices = torch.argmin(d, dim=1)               # [2048], index of codebook
+            z_q = self.embedding(min_encoding_indices).view(z.shape)    # [8, 16, 16, 256]
+            perplexity = None
+            min_encodings = None
+
+            # compute loss for embedding
+            if not self.legacy:
+                loss = self.beta * torch.mean((z_q.detach()-z)**2) + \
+                    torch.mean((z_q - z.detach()) ** 2)
+            else:                                                       # bete = 0.25
+                loss = torch.mean((z_q.detach()-z)**2) + self.beta * \
+                    torch.mean((z_q - z.detach()) ** 2)
+
+            # preserve gradients
+            z_q = z + (z_q - z).detach()
+
+            # reshape back to match original input shape
+            z_q = rearrange(z_q, 'b h w c -> b c h w').contiguous()     # [8, 256, 16, 16]
+
+            if self.remap is not None:
+                min_encoding_indices = min_encoding_indices.reshape(z.shape[0],-1) # add batch axis
+                min_encoding_indices = self.remap_to_used(min_encoding_indices)
+                min_encoding_indices = min_encoding_indices.reshape(-1,1) # flatten
+
+            if self.sane_index_shape:
+                min_encoding_indices = min_encoding_indices.reshape(
+                    z_q.shape[0], z_q.shape[2], z_q.shape[3])
+
+            return z_q, loss, (perplexity, min_encodings, min_encoding_indices)
+        
+       
+        
+        
+
+    def get_codebook_entry(self, indices, shape):           # indices:[2048]
         # shape specifying (batch, height, width, channel)
         if self.remap is not None:
             indices = indices.reshape(shape[0],-1) # add batch axis
@@ -319,14 +344,84 @@ class VectorQuantizer2(nn.Module):
             indices = indices.reshape(-1) # flatten again
 
         # get quantized latent vectors
-        z_q = self.embedding(indices)
+        z_q = self.embedding(indices)     # [2048, 256],换回真值
 
         if shape is not None:
-            z_q = z_q.view(shape)
+            z_q = z_q.view(shape)         # [8, 16, 16, 256])
             # reshape back to match original input shape
-            z_q = z_q.permute(0, 3, 1, 2).contiguous()
+            z_q = z_q.permute(0, 3, 1, 2).contiguous()      # [8, 256, 16, 16])
 
         return z_q
+
+class Cluster(nn.Module):
+    def __init__(self,embed_dim):
+        super().__init__()
+        self.latent_dim = embed_dim
+
+    def forward(self, image_quant, text_quant, mask=None):                      # [8, 256, 16, 16]
+        mask = mask.reshape(1, -1)                                              # [1, 2048]
+        mask = torch.repeat_interleave(mask, mask.size(1), 0)
+
+        image_quant = image_quant.permute(0, 2, 3, 1).contiguous()              # [8, 16, 16, 256]
+        image_quant_flattened = image_quant.view(-1, self.latent_dim)           # [2048, 256]
+
+        text_quant = text_quant.contiguous()                                    # [8, 256, 256]
+        text_quant_flattened = text_quant.view(-1, self.latent_dim)             # [2048, 256]        
+
+        d1 = torch.sum(image_quant_flattened**2, dim=1, keepdim=True) + \
+            torch.sum(text_quant_flattened**2, dim=1) - \
+            2*(torch.matmul(image_quant_flattened, text_quant_flattened.t()))   # [2048, 2048]
+        
+        d2 = torch.sum(text_quant_flattened**2, dim=1, keepdim=True) + \
+            torch.sum(image_quant_flattened**2, dim=1) - \
+            2*(torch.matmul(text_quant_flattened, image_quant_flattened.t()))   # [2048, 2048]
+
+        img_min_encoding_indices = torch.argmin(d1-mask, dim=1)                 # [2048]
+        text_min_encoding_indices = torch.argmin(d2, dim=1)                     # [2048]
+
+        image_quant2 = text_quant_flattened[img_min_encoding_indices].view(image_quant.shape)    # [8, 16, 16, 256]
+        text_quant2  = image_quant_flattened[text_min_encoding_indices].view(text_quant.shape)   # [8, 256, 256]
+
+        image_quant2 = image_quant + (image_quant2 - image_quant).detach()
+        text_quant2 = text_quant + (text_quant2 - text_quant).detach()
+
+        image_quant2 = image_quant2.permute(0, 3, 1, 2)                         #[8, 256, 16, 16]        
+
+        return image_quant2, text_quant2
+    
+class Cluster2(nn.Module):                  #输入输出都是索引形式
+    def __init__(self,embedding):       #codebook向量长度
+        super().__init__()
+        self.embedding = embedding
+
+    def forward(self, z_indices, t_indices):
+        z_indices = z_indices.contiguous()
+        z_indices_flattened = z_indices.view(-1)
+
+        t_indices = t_indices.contiguous()
+        t_indices_flattened = t_indices.view(-1)
+
+        z_codebook =  self.embedding(z_indices_flattened)       #映回codebook空间，以计算距离
+        t_codebook =  self.embedding(t_indices_flattened)
+
+        d1 = torch.sum(z_codebook**2, dim=1, keepdim=True) + \
+            torch.sum(t_codebook**2, dim=1) - \
+            2*(torch.matmul(z_codebook, t_codebook.t()))   #码本向量与潜变量之间的距离,torch.Size([512,154])
+
+        d2 = torch.sum(t_codebook**2, dim=1, keepdim=True) + \
+            torch.sum(z_codebook**2, dim=1) - \
+            2*(torch.matmul(t_codebook, z_codebook.t()))
+
+        img_min_encoding_indices = torch.argmin(d1, dim=1)                                       #距离潜变量最近的码本向量的索引154内
+        text_min_encoding_indices = torch.argmin(d2, dim=1)
+
+        z_indices2 = t_indices_flattened[img_min_encoding_indices].view(z_indices.shape)    #将展平的z_q_x进行嵌入后变换为特征图的维度[12,16,16,256]
+        t_indices2  = z_indices_flattened[text_min_encoding_indices].view(t_indices.shape)
+
+        z_indices2 = z_indices + (z_indices2 - z_indices).detach()
+        t_indices2 = t_indices + (t_indices2 - t_indices).detach()
+
+        return z_indices2, t_indices2
 
 class EmbeddingEMA(nn.Module):
     def __init__(self, num_tokens, codebook_dim, decay=0.99, eps=1e-5):

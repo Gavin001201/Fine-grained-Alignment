@@ -71,31 +71,50 @@ class VQLPIPSWithDiscriminator(nn.Module):
         d_weight = torch.norm(nll_grads) / (torch.norm(g_grads) + 1e-4)
         d_weight = torch.clamp(d_weight, 0.0, 1e4).detach()
         d_weight = d_weight * self.discriminator_weight
-        return d_weight
+        return d_weight                     #那个形而上学的λ
 
-    def forward(self, codebook_loss, inputs, reconstructions, optimizer_idx,
-                global_step, last_layer=None, cond=None, split="train"):
-        rec_loss = torch.abs(inputs.contiguous() - reconstructions.contiguous())
-        if self.perceptual_weight > 0:
-            p_loss = self.perceptual_loss(inputs.contiguous(), reconstructions.contiguous())
-            rec_loss = rec_loss + self.perceptual_weight * p_loss
+    def forward(self, codebook_loss, inputs, reconstructions, i2t_rec, optimizer_idx, global_step,
+                text_input, t2i_rec, text_rec, text_q_loss, last_layer=None, cond=None, split="train"):
+        # image part
+        rec_loss = torch.abs(inputs.contiguous() - reconstructions.contiguous())                #图像->图像  [8, 3, 256, 256])
+        t2i_rec_loss = torch.abs(inputs.contiguous() - t2i_rec.contiguous())                    #文本->图像  [8, 3, 256, 256])
+
+        if self.perceptual_weight > 0:      #1
+            p_loss = self.perceptual_loss(inputs.contiguous(), reconstructions.contiguous())    #图像->图像  [8, 1, 1, 1]
+            t2i_p_loss = self.perceptual_loss(inputs.contiguous(), t2i_rec.contiguous())        #文本->图像  [8, 1, 1, 1]
+
+            rec_loss = rec_loss + self.perceptual_weight * p_loss                               #图像->图像  [8, 3, 256, 256])
+            t2i_rec_loss = t2i_rec_loss + self.perceptual_weight * t2i_p_loss                   #文本->图像  [8, 3, 256, 256])
         else:
             p_loss = torch.tensor([0.0])
 
-        nll_loss = rec_loss
+        nll_loss = rec_loss                                 #图像->图像  [8, 3, 256, 256])
+        t2i_nll_loss = t2i_rec_loss                         #文本->图像  [8, 3, 256, 256])
         #nll_loss = torch.sum(nll_loss) / nll_loss.shape[0]
-        nll_loss = torch.mean(nll_loss)
+        nll_loss = torch.mean(nll_loss)                     #图像->图像, 数字， 非张量矩阵
+        t2i_nll_loss = torch.mean(t2i_nll_loss)             #文本->图像
+
+
+
+        # text part
+        text_input = torch.as_tensor(text_input.squeeze(),dtype=torch.long).flatten()           # [8, 256]-->[2048]
+        t2t_rec_loss = F.cross_entropy(text_rec.reshape(-1, text_rec.size(-1)), text_input)     # [2048, 49408],   [2048]
+        i2t_rec_loss = F.cross_entropy(i2t_rec.reshape(-1, i2t_rec.size(-1)), text_input)
+
 
         # now the GAN part
         if optimizer_idx == 0:
             # generator update
             if cond is None:
                 assert not self.disc_conditional
-                logits_fake = self.discriminator(reconstructions.contiguous())
+                logits_fake = self.discriminator(reconstructions.contiguous())      #图像->图像  [8, 1, 30, 30]
+                t2i_logits_fake = self.discriminator(t2i_rec.contiguous())          #文本->图像  [8, 1, 30, 30]
             else:
                 assert self.disc_conditional
-                logits_fake = self.discriminator(torch.cat((reconstructions.contiguous(), cond), dim=1))
-            g_loss = -torch.mean(logits_fake)
+                logits_fake = self.discriminator(torch.cat((reconstructions.contiguous(), cond), dim=1))    #图像->图像
+                t2i_logits_fake = self.discriminator(torch.cat((t2i_rec.contiguous(), cond), dim=1))        #文本->图像
+            g_loss = -torch.mean(logits_fake)               #图像->图像
+            t2i_g_loss = -torch.mean(t2i_logits_fake)       #文本->图像
 
             try:
                 d_weight = self.calculate_adaptive_weight(nll_loss, g_loss, last_layer=last_layer)
@@ -104,33 +123,58 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 d_weight = torch.tensor(0.0)
 
             disc_factor = adopt_weight(self.disc_factor, global_step, threshold=self.discriminator_iter_start)
+
+            # i_loss = (nll_loss + t2i_nll_loss) + d_weight * disc_factor * (g_loss + t2i_g_loss) + self.codebook_weight * (codebook_loss.mean() + text_q_loss.mean())     #起初并不更新鉴别器，此处更新生成器
+            i_loss = (nll_loss + t2i_nll_loss) + d_weight * disc_factor * (g_loss + t2i_g_loss)
+            # t_loss = (t2t_rec_loss + i2t_rec_loss) + (text_q_loss.mean() + codebook_loss.mean())
+            t_loss = (t2t_rec_loss + i2t_rec_loss)
+            # loss = i_loss + t_loss + self.codebook_weight * codebook_loss.mean() + text_q_loss.mean()
             loss = nll_loss + d_weight * disc_factor * g_loss + self.codebook_weight * codebook_loss.mean()
 
             log = {"{}/total_loss".format(split): loss.clone().detach().mean(),
-                   "{}/quant_loss".format(split): codebook_loss.detach().mean(),
-                   "{}/nll_loss".format(split): nll_loss.detach().mean(),
-                   "{}/rec_loss".format(split): rec_loss.detach().mean(),
-                   "{}/p_loss".format(split): p_loss.detach().mean(),
+                   
+                   "{}/image_total_loss".format(split): i_loss.clone().detach().mean(),
+                   "{}/image_quant_loss".format(split): codebook_loss.detach().mean(),
+                   "{}/i2i_nll_loss".format(split): nll_loss.detach().mean(),
+                   "{}/i2i_rec_loss".format(split): torch.mean(rec_loss-self.perceptual_weight * p_loss).detach().mean(),
+                   "{}/i2i_p_loss".format(split): p_loss.detach().mean(),
+                   "{}/t2i_nll_loss".format(split): t2i_nll_loss.detach().mean(),
+                   "{}/t2i_rec_loss".format(split): torch.mean(t2i_rec_loss-self.perceptual_weight * t2i_p_loss).detach().mean(),
+                   "{}/t2i_p_loss".format(split): t2i_p_loss.detach().mean(),
                    "{}/d_weight".format(split): d_weight.detach(),
                    "{}/disc_factor".format(split): torch.tensor(disc_factor),
-                   "{}/g_loss".format(split): g_loss.detach().mean(),
+                   "{}/i2i_g_loss".format(split): g_loss.detach().mean(),
+                   "{}/t2i_g_loss".format(split): t2i_g_loss.detach().mean(),
+
+                   "{}/text_total_loss".format(split): t_loss.clone().detach().mean(),
+                   "{}/text_quant_loss".format(split): text_q_loss.detach().mean(),
+                   "{}/t2t_rec_loss".format(split): t2t_rec_loss.detach().mean(),
+                   "{}/i2t_rec_loss".format(split): i2t_rec_loss.detach().mean()
                    }
             return loss, log
+
 
         if optimizer_idx == 1:
             # second pass for discriminator update
             if cond is None:
-                logits_real = self.discriminator(inputs.contiguous().detach())
-                logits_fake = self.discriminator(reconstructions.contiguous().detach())
+                logits_real = self.discriminator(inputs.contiguous().detach())              # [8, 1, 30, 30]
+                logits_fake = self.discriminator(reconstructions.contiguous().detach())     # [8, 1, 30, 30]
+                t2i_logits_fake = self.discriminator(t2i_rec.contiguous().detach())         # [8, 1, 30, 30]
             else:
                 logits_real = self.discriminator(torch.cat((inputs.contiguous().detach(), cond), dim=1))
                 logits_fake = self.discriminator(torch.cat((reconstructions.contiguous().detach(), cond), dim=1))
+                t2i_logits_fake = self.discriminator(torch.cat((t2i_rec.contiguous().detach(), cond), dim=1))
 
             disc_factor = adopt_weight(self.disc_factor, global_step, threshold=self.discriminator_iter_start)
-            d_loss = disc_factor * self.disc_loss(logits_real, logits_fake)
+            i2i_d_loss = disc_factor * self.disc_loss(logits_real, logits_fake)
+            t2i_d_loss = disc_factor * self.disc_loss(logits_real, t2i_logits_fake)
+            d_loss = i2i_d_loss + t2i_d_loss
 
-            log = {"{}/disc_loss".format(split): d_loss.clone().detach().mean(),
+            log = {"{}/disc_total_loss".format(split): d_loss.clone().detach().mean(),
+                   "{}/disc_i2i_loss".format(split): i2i_d_loss.clone().detach().mean(),
+                   "{}/disc_t2i_loss".format(split): t2i_d_loss.clone().detach().mean(),
                    "{}/logits_real".format(split): logits_real.detach().mean(),
-                   "{}/logits_fake".format(split): logits_fake.detach().mean()
+                   "{}/i2i_logits_fake".format(split): logits_fake.detach().mean(),
+                   "{}/t2i_logits_fake".format(split): t2i_logits_fake.detach().mean()
                    }
             return d_loss, log
