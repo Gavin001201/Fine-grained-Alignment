@@ -2,6 +2,7 @@ model:
   base_learning_rate: 4.5e-6
   target: taming.models.vqgan.VQModel
   params:
+    ckpt_path: logs/coco_ckpt/coco_epoch117.ckpt
     embed_dim: 256
     n_embed: 1024
     ddconfig:
