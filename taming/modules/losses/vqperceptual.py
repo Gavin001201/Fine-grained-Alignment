@@ -128,8 +128,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
             i_loss = (nll_loss + t2i_nll_loss) + d_weight * disc_factor * (g_loss + t2i_g_loss)
             # t_loss = (t2t_rec_loss + i2t_rec_loss) + (text_q_loss.mean() + codebook_loss.mean())
             t_loss = (t2t_rec_loss + i2t_rec_loss)
-            # loss = i_loss + t_loss + self.codebook_weight * codebook_loss.mean() + text_q_loss.mean()
-            loss = nll_loss + d_weight * disc_factor * g_loss + self.codebook_weight * codebook_loss.mean()
+            loss = i_loss + t_loss + self.codebook_weight * codebook_loss.mean() + text_q_loss.mean()
+            # loss = nll_loss + d_weight * disc_factor * g_loss + self.codebook_weight * codebook_loss.mean()
 
             log = {"{}/total_loss".format(split): loss.clone().detach().mean(),
                    

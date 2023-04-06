@@ -283,7 +283,7 @@ class VectorQuantizer2(nn.Module):          #VectorQuantizer 改进的版本
             codebook_indices = torch.argmin(d, dim=1)
             z_q = self.embedding(codebook_indices).view(z.shape)                            # [8, 256, 256]
 
-            loss = torch.mean((z_q.detach() - z)**2) #+ self.beta * torch.mean((z_q - z.detach())**2)
+            loss = torch.mean((z_q.detach() - z)**2) + self.beta * torch.mean((z_q - z.detach())**2)
 
             z_q = z + (z_q - z).detach()
 
