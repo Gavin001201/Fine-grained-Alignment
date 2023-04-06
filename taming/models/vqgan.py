@@ -46,11 +46,8 @@ class VQModel(pl.LightningModule):
             self.register_buffer("colorize", torch.randn(3, colorize_nlabels, 1, 1))
         # 文本侧
         self.text_encoder = TextTransformer(**ctconfig)
-        self.quant_W = nn.Sequential(nn.Linear(ctconfig["width"], embed_dim, 1),       # 从文本侧的宽度映射到coodbook的宽度
-                                     nn.ReLU())
-        self.post_quant_W = nn.Sequential(nn.Linear(embed_dim, 2*embed_dim),           # 全连接以实现self-attention
-                                          nn.ReLU(),
-                                          nn.Linear(2*embed_dim, embed_dim),
+        self.quant_W = nn.Linear(ctconfig["width"], embed_dim)       # 从文本侧的宽度映射到coodbook的宽度
+        self.post_quant_W = nn.Sequential(nn.Linear(embed_dim, embed_dim),           # 全连接以实现self-attention
                                           nn.ReLU())
         #图像与文本交叉量化
         self.i_t_cluster = Cluster(embed_dim)
