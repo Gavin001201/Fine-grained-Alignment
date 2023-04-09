@@ -1,7 +1,14 @@
+import hashlib
+import logging
+import math
+from typing import Union
+import warnings
 import torch
 from torch import nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
+from tqdm import tqdm
+import urllib
 
 from main import instantiate_from_config
 
@@ -12,6 +19,86 @@ from taming.modules.vqvae.quantize import EMAVectorQuantizer
 from taming.modules.transformer.cliptransformer import TextTransformer
 from taming.modules.vqvae.quantize import Cluster
 from taming.data.base import tokenize
+import os
+
+def download_pretrained_from_url(
+        url: str,
+        cache_dir: Union[str, None] = None,
+):
+    os.makedirs(cache_dir, exist_ok=True)
+    filename = os.path.basename(url)
+
+    if 'openaipublic' in url:
+        expected_sha256 = url.split("/")[-2]
+    elif 'mlfoundations' in url:
+        expected_sha256 = os.path.splitext(filename)[0].split("-")[-1]
+    else:
+        expected_sha256 = ''
+
+    download_target = os.path.join(cache_dir, filename)
+
+    if os.path.exists(download_target) and not os.path.isfile(download_target):
+        raise RuntimeError(f"{download_target} exists and is not a regular file")
+
+    if os.path.isfile(download_target):
+        if expected_sha256:
+            if hashlib.sha256(open(download_target, "rb").read()).hexdigest().startswith(expected_sha256):
+                return download_target
+            else:
+                warnings.warn(f"{download_target} exists, but the SHA256 checksum does not match; re-downloading the file")
+        else:
+            return download_target
+
+    with urllib.request.urlopen(url) as source, open(download_target, "wb") as output:
+        with tqdm(total=int(source.headers.get("Content-Length")), ncols=80, unit='iB', unit_scale=True) as loop:
+            while True:
+                buffer = source.read(8192)
+                if not buffer:
+                    break
+
+                output.write(buffer)
+                loop.update(len(buffer))
+
+    if expected_sha256 and not hashlib.sha256(open(download_target, "rb").read()).hexdigest().startswith(expected_sha256):
+        raise RuntimeError(f"Model has been downloaded but the SHA256 checksum does not not match")
+
+    return download_target
+
+def load_state_dict(checkpoint_path: str, map_location='cpu'):
+    checkpoint = torch.load(checkpoint_path, map_location=map_location)
+    if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
+        state_dict = checkpoint['state_dict']
+    else:
+        state_dict = checkpoint
+    if next(iter(state_dict.items()))[0].startswith('module'):
+        state_dict = {k[7:]: v for k, v in state_dict.items()}
+    return state_dict
+
+# used to maintain checkpoint compatibility
+def convert_to_custom_text_state_dict(state_dict: dict):
+    if 'text_projection' in state_dict:
+        # old format state_dict, move text tower -> .text
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            if any(k.startswith(p) for p in (
+                'text_projection',
+                'positional_embedding',
+                'token_embedding',
+                'transformer',
+                'ln_final',
+            )):
+                k = 'text.' + k
+            new_state_dict[k] = v
+        return new_state_dict
+    return state_dict
+
+def resize_pos_embed(state_dict, pos_embed_width):
+    # Resize the shape of position embeddings when loading from state_dict
+    pos_emb = state_dict.get('positional_embedding', None)
+    pos_emb = pos_emb.unsqueeze(0).permute(0, 2, 1)
+    pos_emb = F.interpolate(pos_emb, size=pos_embed_width)
+    pos_emb = pos_emb.permute(0, 2, 1).squeeze()
+    state_dict['positional_embedding'] = pos_emb
 
 class VQModel(pl.LightningModule):
     def __init__(self,
@@ -21,6 +108,7 @@ class VQModel(pl.LightningModule):
                  n_embed,
                  embed_dim,
                  ckpt_path=None,
+                 ct_ckpt_dir=None,
                  ignore_keys=[],
                  image_key="image",
                  colorize_nlabels=None,
@@ -49,6 +137,8 @@ class VQModel(pl.LightningModule):
         self.quant_W = nn.Linear(ctconfig["width"], embed_dim)       # 从文本侧的宽度映射到coodbook的宽度
         self.post_quant_W = nn.Sequential(nn.Linear(embed_dim, embed_dim),           # 全连接以实现self-attention
                                           nn.ReLU())
+        if ct_ckpt_dir is not None:
+            self.init_from_ct_ckpt(ct_ckpt_dir, self.text_encoder, ctconfig["context_length"], ignore_keys=ignore_keys)
         #图像与文本交叉量化
         self.i_t_cluster = Cluster(embed_dim)
 
@@ -65,6 +155,19 @@ class VQModel(pl.LightningModule):
                     del sd[k]
         self.load_state_dict(sd, strict=False)
         print(f"Restored from {path}")
+
+    def init_from_ct_ckpt(self, path, model, pos_embed_width, ignore_keys=list()):
+        url = 'https://github.com/mlfoundations/open_clip/releases/download/v0.2-weights/vit_b_32-quickgelu-laion400m_e32-46683a32.pt'
+        cache_dir = path
+        checkpoint_path = download_pretrained_from_url(url, cache_dir=cache_dir)
+        state_dict = load_state_dict(checkpoint_path)
+        # detect old format and make compatible with new format
+        if 'positional_embedding' in state_dict and not hasattr(model, 'positional_embedding'):
+            state_dict = convert_to_custom_text_state_dict(state_dict)
+        resize_pos_embed(state_dict, pos_embed_width)
+        incompatible_keys = model.load_state_dict(state_dict, strict=False)
+        return incompatible_keys        
+        
 
     # 图像侧
     def encode(self, x):
@@ -117,21 +220,23 @@ class VQModel(pl.LightningModule):
 
     def get_input(self, batch, k):
         image = batch['image']                                #[8, 256, 256, 3]
-        text = tokenize(list(batch['caption'][0]), context_length=256).to(image.device)                               #[8, 1, 256]
+        text, valid_lens = tokenize(list(batch['caption'][0]), context_length=256)  #[8, 1, 256]
+        text = text.to(image.device)
+        valid_lens = valid_lens.to(image.device)
         if len(text.shape) == 3:
             text = torch.squeeze(text, 1)
         if len(image.shape) == 3:
             image = image[..., None]
         image = image.permute(0, 3, 1, 2).to(memory_format=torch.contiguous_format)
-        return image.float(), text                            #[8, 3, 256, 256], [8, 256]
+        return image.float(), text, valid_lens                            #[8, 3, 256, 256], [8, 256]
 
     def training_step(self, batch, batch_idx, optimizer_idx):
-        image, text = self.get_input(batch, self.image_key)
+        image, text, valid_lens = self.get_input(batch, self.image_key)
         i2i_rec, i2t_rec, image_q_loss, t2t_rec, t2i_rec, text_q_loss = self(image, text)
 
         if optimizer_idx == 0:
             # autoencode
-            loss, log_dict = self.loss(image_q_loss, image, i2i_rec, i2t_rec, optimizer_idx, self.global_step, text, t2i_rec, t2t_rec, text_q_loss,  #返回loss和日志形式的字典
+            loss, log_dict = self.loss(image_q_loss, image, i2i_rec, i2t_rec, optimizer_idx, self.global_step, text, t2i_rec, t2t_rec, text_q_loss, valid_lens,  #返回loss和日志形式的字典
                                             last_layer=self.get_last_layer(), split="train")
 
             self.log("train/loss", loss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
@@ -140,20 +245,20 @@ class VQModel(pl.LightningModule):
 
         if optimizer_idx == 1:
             # discriminator
-            discloss, log_dict_disc = self.loss(image_q_loss, image, i2i_rec, i2t_rec, optimizer_idx, self.global_step, text, t2i_rec, t2t_rec, text_q_loss,
+            discloss, log_dict_disc = self.loss(image_q_loss, image, i2i_rec, i2t_rec, optimizer_idx, self.global_step, text, t2i_rec, t2t_rec, text_q_loss, valid_lens,
                                             last_layer=self.get_last_layer(), split="train")
             self.log("train/discloss", discloss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
             self.log_dict(log_dict_disc, prog_bar=False, logger=True, on_step=True, on_epoch=True)
             return discloss
 
     def validation_step(self, batch, batch_idx):
-        image, text = self.get_input(batch, self.image_key) #torch.Size([3, 3, 256, 256]), torch.Size([3, 1, 77])
+        image, text, valid_lens = self.get_input(batch, self.image_key) #torch.Size([3, 3, 256, 256]), torch.Size([3, 1, 77])
         i2i_rec, i2t_rec, image_q_loss, t2t_rec, t2i_rec, text_q_loss = self(image, text)                           #AE重构图，codebook损失
 
-        loss, log_dict = self.loss(image_q_loss, image, i2i_rec, i2t_rec, 0, self.global_step, text, t2i_rec, t2t_rec, text_q_loss,       #生成器的验证损失，以及字典形式的损失日志
+        loss, log_dict = self.loss(image_q_loss, image, i2i_rec, i2t_rec, 0, self.global_step, text, t2i_rec, t2t_rec, text_q_loss, valid_lens,      #生成器的验证损失，以及字典形式的损失日志
                                             last_layer=self.get_last_layer(), split="val")
 
-        discloss, log_dict_disc = self.loss(image_q_loss, image, i2i_rec, i2t_rec, 1, self.global_step, text, t2i_rec, t2t_rec, text_q_loss,  #判别器的验证损失日志
+        discloss, log_dict_disc = self.loss(image_q_loss, image, i2i_rec, i2t_rec, 1, self.global_step, text, t2i_rec, t2t_rec, text_q_loss, valid_lens, #判别器的验证损失日志
                                             last_layer=self.get_last_layer(), split="val")
         
         #log：像是TensorBoard等log记录器，对于每个log的标量，都会有一个相对应的横坐标，它可能是batch number或epoch number
@@ -187,7 +292,7 @@ class VQModel(pl.LightningModule):
 
     def log_images(self, batch, **kwargs):
         log = dict()
-        image, text = self.get_input(batch, self.image_key)       #tuple(image, text)
+        image, text, _ = self.get_input(batch, self.image_key)       #tuple(image, text)
         image = image.to(self.device)
         text = text.to(self.device)
         i2i_rec, i2t_rec, image_q_loss , t2t_rec, t2i_rec, text_q_loss= self(image, text)

@@ -1,4 +1,4 @@
-## 这个版本加入了文本侧的代码，对文本侧进行梯度反向传播，无交叉量化，codebook向文本侧靠拢，图像侧使用预训练权重，与完全放开只差交叉量化
+## 全部放开，图像与文本侧都使用预训练模型权重，文本损失只考虑非pad的token
 ```
 conda env create -f environment.yaml
 conda activate taming

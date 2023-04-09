@@ -3,8 +3,9 @@ model:
   target: taming.models.vqgan.VQModel
   params:
     ckpt_path: logs/coco_ckpt/coco_epoch117.ckpt
+    ct_ckpt_dir: logs/ct_ckpt_path/clip
     embed_dim: 256
-    n_embed: 1024
+    n_embed: 8192
     ddconfig:
       double_z: False
       z_channels: 256
@@ -20,10 +21,10 @@ model:
     ctconfig:                #cliptransformer_config
       context_length:  256
       vocab_size: 49408
-      width: 256
-      heads: 8
-      layers: 12
-      quick_gelu: False
+      width: 512
+      heads: 4
+      layers: 10
+      quick_gelu: True
       pad_id: 0
     lossconfig:
       target: taming.modules.losses.vqperceptual.VQLPIPSWithDiscriminator
@@ -37,8 +38,8 @@ model:
 data:
   target: main.DataModuleFromConfig
   params:
-    batch_size: 12
-    num_workers: 16
+    batch_size: 1
+    num_workers: 8
     train:
       target: taming.data.coco.CocoImagesAndCaptionsTrain
       params:

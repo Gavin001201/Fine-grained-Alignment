@@ -74,7 +74,8 @@ class CocoBase(Dataset):
         capdirs = self.json_data["annotations"]
         for capdir in tqdm(capdirs, desc="ImgToCaptions"):
             # there are in average 5 captions per image
-            self.img_id_to_captions[capdir["image_id"]].append(np.array([capdir["caption"]]))
+            if capdir["image_id"] in self.img_id_to_captions.keys():
+                self.img_id_to_captions[capdir["image_id"]].append(np.array([capdir["caption"]]))
 
         self.rescaler = albumentations.SmallestMaxSize(max_size=self.size)
         if self.split=="validation":
