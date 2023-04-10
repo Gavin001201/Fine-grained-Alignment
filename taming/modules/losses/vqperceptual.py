@@ -117,8 +117,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
         loss = MaskedSoftmaxCELoss()
            
         # text_input = torch.as_tensor(text_input.squeeze(),dtype=torch.long).flatten()           # [8, 256]-->[2048]
-        t2t_rec_loss = loss(text_rec, text_input, valid_lens)     # [2048, 49408],   [2048]
-        i2t_rec_loss = loss(i2t_rec, text_input, valid_lens)
+        t2t_rec_loss = loss(text_rec, text_input, valid_lens).mean()     # [2048, 49408],   [2048]
+        i2t_rec_loss = loss(i2t_rec, text_input, valid_lens).mean()
 
 
         # now the GAN part
