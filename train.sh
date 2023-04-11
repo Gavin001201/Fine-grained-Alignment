@@ -13,4 +13,4 @@ unzip -d ./data/coco val2017.zip
 unzip -d ./data/coco annotations_trainval2017.zip
 unzip -d ./data/cocostuffthings stuffthingmaps_trainval2017.zip
 
-python main.py --base configs/custom_vqgan.yaml -t True --gpus 0,
+python main.py --base configs/custom_vqgan.yaml -t True --gpus 0,1,2,4,5,6,7
