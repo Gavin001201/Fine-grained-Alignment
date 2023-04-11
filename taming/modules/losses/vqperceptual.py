@@ -30,7 +30,26 @@ def vanilla_d_loss(logits_real, logits_fake):
         torch.mean(torch.nn.functional.softplus(logits_fake)))
     return d_loss
 
+def sequence_mask(X, valid_lens, value=0):
+    '''在序列中屏蔽不相关项'''
+    maxlen = X.size(1)
+    mask = torch.arange((maxlen), dtype=torch.float32, device=X.device)[None, :] < valid_lens[:, None]
+    X[~mask] = value
+    return X
 
+class MaskedSoftmaxCELoss(nn.CrossEntropyLoss):
+    """带遮蔽的softmax交叉熵损失函数"""
+    # pred的形状：(batch_size,num_steps,vocab_size)
+    # label的形状：(batch_size,num_steps)
+    # valid_len的形状：(batch_size,)
+    def forward(self, pred, label, valid_len):
+        weights = torch.ones_like(label)
+        weights = sequence_mask(weights, valid_len)
+        self.reduction='none'
+        unweighted_loss = super().forward(pred.permute(0, 2, 1), label.long())
+        weighted_loss = (unweighted_loss * weights).mean(dim=1)
+        return weighted_loss
+    
 class VQLPIPSWithDiscriminator(nn.Module):
     def __init__(self, disc_start, codebook_weight=1.0, pixelloss_weight=1.0,
                  disc_num_layers=3, disc_in_channels=3, disc_factor=1.0, disc_weight=1.0,
@@ -74,7 +93,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         return d_weight                     #那个形而上学的λ
 
     def forward(self, codebook_loss, inputs, reconstructions, i2t_rec, optimizer_idx, global_step,
-                text_input, t2i_rec, text_rec, text_q_loss, last_layer=None, cond=None, split="train"):
+                text_input, t2i_rec, text_rec, text_q_loss, valid_lens, last_layer=None, cond=None, split="train"):
         # image part
         rec_loss = torch.abs(inputs.contiguous() - reconstructions.contiguous())                #图像->图像  [8, 3, 256, 256])
         t2i_rec_loss = torch.abs(inputs.contiguous() - t2i_rec.contiguous())                    #文本->图像  [8, 3, 256, 256])
@@ -94,12 +113,12 @@ class VQLPIPSWithDiscriminator(nn.Module):
         nll_loss = torch.mean(nll_loss)                     #图像->图像, 数字， 非张量矩阵
         t2i_nll_loss = torch.mean(t2i_nll_loss)             #文本->图像
 
-
-
         # text part
-        text_input = torch.as_tensor(text_input.squeeze(),dtype=torch.long).flatten()           # [8, 256]-->[2048]
-        t2t_rec_loss = F.cross_entropy(text_rec.reshape(-1, text_rec.size(-1)), text_input)     # [2048, 49408],   [2048]
-        i2t_rec_loss = F.cross_entropy(i2t_rec.reshape(-1, i2t_rec.size(-1)), text_input)
+        loss = MaskedSoftmaxCELoss()
+           
+        # text_input = torch.as_tensor(text_input.squeeze(),dtype=torch.long).flatten()           # [8, 256]-->[2048]
+        t2t_rec_loss = loss(text_rec, text_input, valid_lens).mean()     # [2048, 49408],   [2048]
+        i2t_rec_loss = loss(i2t_rec, text_input, valid_lens).mean()
 
 
         # now the GAN part
@@ -128,8 +147,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
             i_loss = (nll_loss + t2i_nll_loss) + d_weight * disc_factor * (g_loss + t2i_g_loss)
             # t_loss = (t2t_rec_loss + i2t_rec_loss) + (text_q_loss.mean() + codebook_loss.mean())
             t_loss = (t2t_rec_loss + i2t_rec_loss)
-            # loss = i_loss + t_loss + self.codebook_weight * codebook_loss.mean() + text_q_loss.mean()
-            loss = nll_loss + d_weight * disc_factor * g_loss + self.codebook_weight * codebook_loss.mean()
+            loss = i_loss + t_loss + self.codebook_weight * codebook_loss.mean() + text_q_loss.mean()
+            # loss = nll_loss + d_weight * disc_factor * g_loss + self.codebook_weight * codebook_loss.mean()
 
             log = {"{}/total_loss".format(split): loss.clone().detach().mean(),
                    

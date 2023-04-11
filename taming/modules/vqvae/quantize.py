@@ -283,7 +283,7 @@ class VectorQuantizer2(nn.Module):          #VectorQuantizer 改进的版本
             codebook_indices = torch.argmin(d, dim=1)
             z_q = self.embedding(codebook_indices).view(z.shape)                            # [8, 256, 256]
 
-            loss = torch.mean((z_q.detach() - z)**2) #+ self.beta * torch.mean((z_q - z.detach())**2)
+            loss = torch.mean((z_q.detach() - z)**2) + self.beta * torch.mean((z_q - z.detach())**2)
 
             z_q = z + (z_q - z).detach()
 
@@ -359,14 +359,14 @@ class Cluster(nn.Module):
         self.latent_dim = embed_dim
 
     def forward(self, image_quant, text_quant, mask=None):                      # [8, 256, 16, 16]
-        mask = mask.reshape(1, -1)                                              # [1, 2048]
+        mask = mask.reshape(1, -1).contiguous()                                              # [1, 2048]
         mask = torch.repeat_interleave(mask, mask.size(1), 0)
 
         image_quant = image_quant.permute(0, 2, 3, 1).contiguous()              # [8, 16, 16, 256]
         image_quant_flattened = image_quant.view(-1, self.latent_dim)           # [2048, 256]
 
         text_quant = text_quant.contiguous()                                    # [8, 256, 256]
-        text_quant_flattened = text_quant.view(-1, self.latent_dim)             # [2048, 256]        
+        text_quant_flattened = text_quant.view(-1, self.latent_dim).contiguous()             # [2048, 256]        
 
         d1 = torch.sum(image_quant_flattened**2, dim=1, keepdim=True) + \
             torch.sum(text_quant_flattened**2, dim=1) - \
@@ -385,7 +385,7 @@ class Cluster(nn.Module):
         image_quant2 = image_quant + (image_quant2 - image_quant).detach()
         text_quant2 = text_quant + (text_quant2 - text_quant).detach()
 
-        image_quant2 = image_quant2.permute(0, 3, 1, 2)                         #[8, 256, 16, 16]        
+        image_quant2 = image_quant2.permute(0, 3, 1, 2).contiguous()                         #[8, 256, 16, 16]        
 
         return image_quant2, text_quant2
     

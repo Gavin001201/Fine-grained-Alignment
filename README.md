@@ -1,4 +1,4 @@
-## 下面是官方的环境配置，但是版本较老，cuda版本大概率会冲突
+## 全部放开，图像与文本侧都使用预训练模型权重，文本损失只考虑非pad的token
 ```
 conda env create -f environment.yaml
 conda activate taming

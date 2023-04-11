@@ -505,8 +505,9 @@ class Decoder(nn.Module):
         
         self.text_linear_out = nn.Linear(block_in, self.vocabsize)
         self.text_mlp_out = nn.Sequential(nn.Linear(256**2, 256),
-                                          nn.ReLU())
-        self.ln_out = nn.LayerNorm(49408)
+                                          nn.ReLU(),
+                                          nn.LayerNorm(256),
+                                          nn.Linear(256, 256))
 
     def forward(self, z, key=None):
         #assert z.shape[1:] == self.z_shape[1:]
@@ -542,7 +543,6 @@ class Decoder(nn.Module):
             h = h.reshape(h.size(0), h.size(1), -1)     # [8, 128, 65536]
             h = self.text_mlp_out(h).permute(0, 2, 1)   # [8, 256, 128]
             h = self.text_linear_out(h)                 # [8, 256, 49408])
-            h = self.ln_out(h)
             return h
 
         h = self.conv_out(h)    # [8, 3, 256, 256]
