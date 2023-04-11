@@ -520,7 +520,7 @@ if __name__ == "__main__":
         callbacks_cfg = OmegaConf.merge(default_callbacks_cfg, callbacks_cfg)
         trainer_kwargs["callbacks"] = [instantiate_from_config(callbacks_cfg[k]) for k in callbacks_cfg]
 
-        trainer = Trainer.from_argparse_args(trainer_opt, **trainer_kwargs, max_epochs=60)
+        trainer = Trainer.from_argparse_args(trainer_opt, **trainer_kwargs, max_epochs=118)
 
         # data
         data = instantiate_from_config(config.data)
