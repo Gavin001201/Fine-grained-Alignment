@@ -212,7 +212,7 @@ class VQModel(pl.LightningModule):
         image_quant, image_q_loss, _ = self.encode(image)
         text_quant,  text_q_loss, _, mask = self.text_encode(text)
 
-        # image_quant, text_quant = self.i_t_cluster(image_quant, text_quant, mask)           # [8, 256, 16, 16],  [8, 256, 256]
+        image_quant, text_quant = self.i_t_cluster(image_quant, text_quant, mask)           # [8, 256, 16, 16],  [8, 256, 256]
 
         i2i_rec, i2t_rec = self.decode(image_quant)              # [8, 3, 256, 256],   [8, 256, 49408]
         t2t_rec, t2i_rec  = self.text_decode(text_quant)        #不是整数, [8, 256, 49408],   [8, 3, 256, 256]
