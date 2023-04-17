@@ -45,6 +45,7 @@ class Attention(nn.Module):
     def __init__(
             self,
             dim,
+            context_length=256,
             num_heads=8,
             qkv_bias=True,
             scaled_cosine=False,
@@ -58,9 +59,11 @@ class Attention(nn.Module):
         self.scale_heads = scale_heads
         assert dim % num_heads == 0, 'dim should be divisible by num_heads'
         self.num_heads = num_heads
-        self.head_dim = dim // num_heads
-        self.scale = self.head_dim ** -0.5
+        self.head_dim = dim // num_heads,
+        self.context_length = context_length
+        self.scale = self.head_dim[0] ** -0.5
         self.logit_scale_max = logit_scale_max
+        self.positional_embedding = nn.Parameter(torch.randn(self.context_length, dim))
 
         # keeping in_proj in this form (instead of nn.Linear) to match weight scheme of original
         self.in_proj_weight = nn.Parameter(torch.randn((dim * 3, dim)) * self.scale)
@@ -80,9 +83,20 @@ class Attention(nn.Module):
             self.head_scale = None
         self.out_proj = nn.Linear(dim, dim)
         self.out_drop = nn.Dropout(proj_drop)
+        self.layernorm = nn.LayerNorm(dim)
 
-    def forward(self, x, attn_mask: Optional[torch.Tensor] = None):
+    def forward(self, x, attn_mask: Optional[torch.Tensor] = None, valid_lens = None):
         L, N, C = x.shape
+
+        # 将无效处 置为0
+        valid_lens = valid_lens.to(x.device)
+        mask = torch.arange(N, device=valid_lens.device)[None, :] >= valid_lens[:, None]
+        mask = mask.unsqueeze(-1).expand(-1, -1, C)
+        x = x.masked_fill(mask, 0.0)
+
+        pos_emb = self.layernorm(self.positional_embedding)
+        x = x + pos_emb
+        x = self.layernorm(x)
         q, k, v = F.linear(x, self.in_proj_weight, self.in_proj_bias).chunk(3, dim=-1)
         q = q.contiguous().view(L, N * self.num_heads, -1).transpose(0, 1)
         k = k.contiguous().view(L, N * self.num_heads, -1).transpose(0, 1)
@@ -113,6 +127,7 @@ class Attention(nn.Module):
             x = x.view(-1, L, C)
         x = x.transpose(0, 1).reshape(L, N, C)
         x = self.out_proj(x)
+        x = self.layernorm(x)
         x = self.out_drop(x)
         return x
 
@@ -273,7 +288,7 @@ class TextTransformer(nn.Module):
         mask.triu_(1)  # zero out the lower diagonal
         return mask
 
-    def forward(self, text):
+    def forward(self, text, valid_lens):
         cast_dtype = self.transformer.get_cast_dtype()
 
         if len(text.shape) == 3:
@@ -287,7 +302,10 @@ class TextTransformer(nn.Module):
         additive_mask = torch.empty(pad_mask.shape, dtype=cast_dtype, device=attn_mask.device)
         additive_mask.fill_(0)
         additive_mask.masked_fill_(~pad_mask, float("-inf"))                        # [8, 1, 256]
-        mask = additive_mask
+        mask = additive_mask.squeeze()
+        for i in range(len(mask)):
+            mask[i][0] = float("-inf")
+            mask[i][int(valid_lens[i])-1] = float("-inf")
         additive_mask = torch.repeat_interleave(additive_mask, self.heads, 0)       # [64, 1, 256]
         additive_mask = torch.repeat_interleave(additive_mask, text.shape[1], 1)    # [64, 256, 256]
         attn_mask = additive_mask

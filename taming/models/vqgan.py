@@ -16,7 +16,7 @@ from taming.modules.diffusionmodules.model import Encoder, Decoder
 from taming.modules.vqvae.quantize import VectorQuantizer2 as VectorQuantizer
 from taming.modules.vqvae.quantize import GumbelQuantize
 from taming.modules.vqvae.quantize import EMAVectorQuantizer
-from taming.modules.transformer.cliptransformer import TextTransformer
+from taming.modules.transformer.cliptransformer import TextTransformer, Attention
 from taming.modules.vqvae.quantize import Cluster
 from taming.data.base import tokenize
 import os
@@ -135,8 +135,9 @@ class VQModel(pl.LightningModule):
         # 文本侧
         self.text_encoder = TextTransformer(**ctconfig)
         self.quant_W = nn.Linear(ctconfig["width"], embed_dim)       # 从文本侧的宽度映射到coodbook的宽度
-        self.post_quant_W = nn.Sequential(nn.Linear(embed_dim, embed_dim),           # 全连接以实现self-attention
-                                          nn.ReLU())
+        # self.post_quant_W = nn.Sequential(nn.Linear(embed_dim, embed_dim),           # 全连接以实现self-attention
+        #                                   nn.ReLU())
+        self.post_quant_W = Attention(dim=embed_dim, context_length=ctconfig["context_length"], num_heads=4)
         if ct_ckpt_dir is not None:
             self.init_from_ct_ckpt(ct_ckpt_dir, self.text_encoder, ctconfig["context_length"], ignore_keys=ignore_keys)
         #图像与文本交叉量化
@@ -190,15 +191,15 @@ class VQModel(pl.LightningModule):
         return dec
 
     #文本侧
-    def text_encode(self, x):
-        h, mask = self.text_encoder(x)              #[bs, l, d]  [8, 256, 256], mask在图像替换时使用
+    def text_encode(self, x, valid_lens):
+        h, mask = self.text_encoder(x, valid_lens)              #[bs, l, d]  [8, 256, 256], mask在图像替换时使用
         h = self.quant_W(h)
         quant, q_loss, codebook_indices = self.quantize(h, key='text')     #quant: [8, 256, 256]
         return quant, q_loss, codebook_indices, mask
 
-    def text_decode(self, quant):             # [bs, l, d]  [8, 256, 256]
-        quant = quant.permute(0, 2, 1)        # [bs, d, l]  [8, 256, 256]
-        quant = self.post_quant_W(quant)      # 这里以全连接实现 self-attention
+    def text_decode(self, quant, valid_lens):             # [bs, l, d]  [8, 256, 256]
+        # quant = quant.permute(0, 2, 1)        # [bs, d, l]  [8, 256, 256]
+        quant = self.post_quant_W(quant, attn_mask=None, valid_lens=valid_lens)      # 这里以全连接实现 self-attention
         quant = quant.reshape(quant.size(0), quant.size(1), 16, 16)             #[bs, d, H, W],   [8, 256, 16, 16]
 
         #文本->文本
@@ -208,14 +209,14 @@ class VQModel(pl.LightningModule):
         t2i_rec = self.decoder(quant)
         return t2t_rec, t2i_rec
     
-    def forward(self, image, text):
+    def forward(self, image, text, valid_lens):
         image_quant, image_q_loss, _ = self.encode(image)
-        text_quant,  text_q_loss, _, mask = self.text_encode(text)
+        text_quant,  text_q_loss, _, mask = self.text_encode(text, valid_lens)
 
-        image_quant, text_quant = self.i_t_cluster(image_quant, text_quant, mask)           # [8, 256, 16, 16],  [8, 256, 256]
+        image_quant, text_quant = self.i_t_cluster(image_quant, text_quant, mask, valid_lens)           # [8, 256, 16, 16],  [8, 256, 256]
 
         i2i_rec, i2t_rec = self.decode(image_quant)              # [8, 3, 256, 256],   [8, 256, 49408]
-        t2t_rec, t2i_rec  = self.text_decode(text_quant)        #不是整数, [8, 256, 49408],   [8, 3, 256, 256]
+        t2t_rec, t2i_rec  = self.text_decode(text_quant, valid_lens)        #不是整数, [8, 256, 49408],   [8, 3, 256, 256]
         return i2i_rec, i2t_rec, image_q_loss,    t2t_rec, t2i_rec, text_q_loss         # q_loss 是文本与图像相互替换时的损失
 
     def get_input(self, batch, k):
@@ -232,7 +233,7 @@ class VQModel(pl.LightningModule):
 
     def training_step(self, batch, batch_idx, optimizer_idx):
         image, text, valid_lens = self.get_input(batch, self.image_key)
-        i2i_rec, i2t_rec, image_q_loss, t2t_rec, t2i_rec, text_q_loss = self(image, text)
+        i2i_rec, i2t_rec, image_q_loss, t2t_rec, t2i_rec, text_q_loss = self(image, text, valid_lens)
 
         if optimizer_idx == 0:
             # autoencode
@@ -253,7 +254,7 @@ class VQModel(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         image, text, valid_lens = self.get_input(batch, self.image_key) #torch.Size([3, 3, 256, 256]), torch.Size([3, 1, 77])
-        i2i_rec, i2t_rec, image_q_loss, t2t_rec, t2i_rec, text_q_loss = self(image, text)                           #AE重构图，codebook损失
+        i2i_rec, i2t_rec, image_q_loss, t2t_rec, t2i_rec, text_q_loss = self(image, text, valid_lens)                           #AE重构图，codebook损失
 
         loss, log_dict = self.loss(image_q_loss, image, i2i_rec, i2t_rec, 0, self.global_step, text, t2i_rec, t2t_rec, text_q_loss, valid_lens,      #生成器的验证损失，以及字典形式的损失日志
                                             last_layer=self.get_last_layer(), split="val")
@@ -292,10 +293,10 @@ class VQModel(pl.LightningModule):
 
     def log_images(self, batch, **kwargs):
         log = dict()
-        image, text, _ = self.get_input(batch, self.image_key)       #tuple(image, text)
+        image, text, valid_lens = self.get_input(batch, self.image_key)       #tuple(image, text)
         image = image.to(self.device)
         text = text.to(self.device)
-        i2i_rec, i2t_rec, image_q_loss , t2t_rec, t2i_rec, text_q_loss= self(image, text)
+        i2i_rec, i2t_rec, image_q_loss , t2t_rec, t2i_rec, text_q_loss= self(image, text, valid_lens)
         if image.shape[1] > 3:
             # colorize with random projection
             assert i2i_rec.shape[1] > 3

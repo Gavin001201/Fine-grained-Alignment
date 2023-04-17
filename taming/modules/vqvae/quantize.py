@@ -358,30 +358,39 @@ class Cluster(nn.Module):
         super().__init__()
         self.latent_dim = embed_dim
 
-    def forward(self, image_quant, text_quant, mask=None):                      # [8, 256, 16, 16]
-        mask = mask.reshape(1, -1).contiguous()                                              # [1, 2048]
-        mask = torch.repeat_interleave(mask, mask.size(1), 0)
-
+    def forward(self, image_quant, text_quant, mask=None, valid_lens=None):                      # [8, 256, 16, 16]
+        num_chunk = mask.size(0)
         image_quant = image_quant.permute(0, 2, 3, 1).contiguous()              # [8, 16, 16, 256]
-        image_quant_flattened = image_quant.view(-1, self.latent_dim)           # [2048, 256]
+        image_quant_flattened = image_quant.view(image_quant.size(0), -1, image_quant.size(3))
+        text_quant_flattened = text_quant.contiguous()                          # [8, 256, 256]   
 
-        text_quant = text_quant.contiguous()                                    # [8, 256, 256]
-        text_quant_flattened = text_quant.view(-1, self.latent_dim).contiguous()             # [2048, 256]        
-
-        d1 = torch.sum(image_quant_flattened**2, dim=1, keepdim=True) + \
-            torch.sum(text_quant_flattened**2, dim=1) - \
-            2*(torch.matmul(image_quant_flattened, text_quant_flattened.t()))   # [2048, 2048]
+        image_quant2 = torch.zeros_like(image_quant_flattened)
+        text_quant2 = torch.zeros_like(text_quant_flattened)
         
-        d2 = torch.sum(text_quant_flattened**2, dim=1, keepdim=True) + \
-            torch.sum(image_quant_flattened**2, dim=1) - \
-            2*(torch.matmul(text_quant_flattened, image_quant_flattened.t()))   # [2048, 2048]
+        for i in range(num_chunk):
+            d1 = torch.sum(image_quant_flattened[i]**2, dim=1, keepdim=True) + \
+                torch.sum(text_quant_flattened[i]**2, dim=1) - \
+                2*(torch.matmul(image_quant_flattened[i], text_quant_flattened[i].t()))   # [2048, 2048]
+            d2 = torch.sum(text_quant_flattened[i]**2, dim=1, keepdim=True) + \
+                torch.sum(image_quant_flattened[i]**2, dim=1) - \
+                2*(torch.matmul(text_quant_flattened[i], image_quant_flattened[i].t()))   # [2048, 2048]
+            img_min_encoding_indices = torch.argmin(d1-mask[i], dim=1)
+            text_min_encoding_indices = torch.argmin(d2, dim=1)
 
-        img_min_encoding_indices = torch.argmin(d1-mask, dim=1)                 # [2048]
-        text_min_encoding_indices = torch.argmin(d2, dim=1)                     # [2048]
+            # img_unique_values = torch.unique(img_min_encoding_indices).cpu().numpy().tolist()  # 计算tensor中的唯一值
+            # img_counts = torch.bincount(img_min_encoding_indices)  # 统计每个唯一值出现的次数
+            # img_counts = img_counts[img_counts != 0].cpu().numpy().tolist()
+            # img_counts_dict = dict(zip(img_unique_values,img_counts))
 
-        image_quant2 = text_quant_flattened[img_min_encoding_indices].view(image_quant.shape)    # [8, 16, 16, 256]
-        text_quant2  = image_quant_flattened[text_min_encoding_indices].view(text_quant.shape)   # [8, 256, 256]
+            # text_unique_values = torch.unique(text_min_encoding_indices).cpu().numpy().tolist()
+            # text_counts = torch.bincount(text_min_encoding_indices)
+            # text_counts = text_counts[text_counts != 0].cpu().numpy().tolist()
+            # text_count_dict = dict(zip(text_unique_values, text_counts))
 
+            image_quant2[i] = text_quant_flattened[i][img_min_encoding_indices]
+            text_quant2[i] = image_quant_flattened[i][text_min_encoding_indices]
+
+        image_quant2 = image_quant2.view_as(image_quant)
         image_quant2 = image_quant + (image_quant2 - image_quant).detach()
         text_quant2 = text_quant + (text_quant2 - text_quant).detach()
 
