@@ -404,7 +404,7 @@ if __name__ == "__main__":
         else:
             name = ""
         # nowname = now+name+opt.postfix
-        nowname = 'latter_attention-'+now+opt.postfix
+        nowname = 'former_attention-'+now+opt.postfix
         logdir = os.path.join("logs", nowname)
 
     ckptdir = os.path.join(logdir, "checkpoints")
