@@ -403,7 +403,8 @@ if __name__ == "__main__":
             name = "_"+cfg_name
         else:
             name = ""
-        nowname = now+name+opt.postfix
+        # nowname = now+name+opt.postfix
+        nowname = 'latter_attention-'+now+opt.postfix
         logdir = os.path.join("logs", nowname)
 
     ckptdir = os.path.join(logdir, "checkpoints")
@@ -520,7 +521,7 @@ if __name__ == "__main__":
         callbacks_cfg = OmegaConf.merge(default_callbacks_cfg, callbacks_cfg)
         trainer_kwargs["callbacks"] = [instantiate_from_config(callbacks_cfg[k]) for k in callbacks_cfg]
 
-        trainer = Trainer.from_argparse_args(trainer_opt, **trainer_kwargs, max_epochs=118)
+        trainer = Trainer.from_argparse_args(trainer_opt, **trainer_kwargs)
 
         # data
         data = instantiate_from_config(config.data)
