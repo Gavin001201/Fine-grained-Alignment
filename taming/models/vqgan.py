@@ -135,9 +135,9 @@ class VQModel(pl.LightningModule):
         # 文本侧
         self.text_encoder = TextTransformer(**ctconfig)
         self.quant_W = nn.Linear(ctconfig["width"], embed_dim)       # 从文本侧的宽度映射到coodbook的宽度
-        # self.post_quant_W = nn.Sequential(nn.Linear(embed_dim, embed_dim),           # 全连接以实现self-attention
-        #                                   nn.ReLU())
-        self.post_quant_W = Attention(dim=embed_dim, context_length=ctconfig["context_length"], num_heads=4)
+        self.post_quant_W = nn.Sequential(nn.Linear(embed_dim, embed_dim),           # 全连接以实现self-attention
+                                          nn.ReLU())
+        # self.post_quant_W = Attention(dim=embed_dim, context_length=ctconfig["context_length"], num_heads=4)
         if ct_ckpt_dir is not None:
             self.init_from_ct_ckpt(ct_ckpt_dir, self.text_encoder, ctconfig["context_length"], ignore_keys=ignore_keys)
         #图像与文本交叉量化
@@ -198,8 +198,9 @@ class VQModel(pl.LightningModule):
         return quant, q_loss, codebook_indices, mask
 
     def text_decode(self, quant, valid_lens):             # [bs, l, d]  [8, 256, 256]
-        # quant = quant.permute(0, 2, 1)        # [bs, d, l]  [8, 256, 256]
-        quant = self.post_quant_W(quant, attn_mask=None, valid_lens=valid_lens)      # 这里以全连接实现 self-attention
+        quant = quant.permute(0, 2, 1)        # [bs, d, l]  [8, 256, 256]
+        # quant = self.post_quant_W(quant, attn_mask=None, valid_lens=valid_lens)
+        quant = self.post_quant_W(quant)      # 这里以全连接实现 self-attention
         quant = quant.reshape(quant.size(0), quant.size(1), 16, 16)             #[bs, d, H, W],   [8, 256, 16, 16]
 
         #文本->文本
