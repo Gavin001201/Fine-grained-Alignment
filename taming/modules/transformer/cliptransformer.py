@@ -303,9 +303,6 @@ class TextTransformer(nn.Module):
         additive_mask.fill_(0)
         additive_mask.masked_fill_(~pad_mask, float("-inf"))                        # [8, 1, 256]
         mask = additive_mask.squeeze()
-        for i in range(len(mask)):
-            mask[i][0] = float("-inf")
-            mask[i][int(valid_lens[i])-1] = float("-inf")
         additive_mask = torch.repeat_interleave(additive_mask, self.heads, 0)       # [64, 1, 256]
         additive_mask = torch.repeat_interleave(additive_mask, text.shape[1], 1)    # [64, 256, 256]
         attn_mask = additive_mask
