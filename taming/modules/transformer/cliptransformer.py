@@ -305,9 +305,18 @@ class TextTransformer(nn.Module):
         mask = additive_mask.squeeze()
         additive_mask = torch.repeat_interleave(additive_mask, self.heads, 0)       # [64, 1, 256]
         additive_mask = torch.repeat_interleave(additive_mask, text.shape[1], 1)    # [64, 256, 256]
-        attn_mask = additive_mask
+        attn_mask = torch.zeros_like(additive_mask)
 
         x = self.token_embedding(text).to(cast_dtype)  # [batch_size, n_ctx, d_model], [8, 256, 256]
+
+        L, N, C = x.shape
+
+        # 将无效处 置为0
+        valid_lens = valid_lens.to(x.device)
+        mask_2 = torch.arange(N, device=valid_lens.device)[None, :] >= valid_lens[:, None]
+        mask_2 = mask_2.unsqueeze(-1).expand(-1, -1, C)
+        x = x.masked_fill(mask_2, 0.0)
+
         x = x + self.positional_embedding[:seq_len].to(cast_dtype)      # [8, 256, 256]
         x = x.permute(1, 0, 2)  # NLD -> LND                [256, 8, 256]
         x = self.transformer(x, attn_mask=attn_mask)        # [256, 8, 256]

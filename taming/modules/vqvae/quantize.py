@@ -374,7 +374,7 @@ class Cluster(nn.Module):
             d2 = torch.sum(text_quant_flattened[i]**2, dim=1, keepdim=True) + \
                 torch.sum(image_quant_flattened[i]**2, dim=1) - \
                 2*(torch.matmul(text_quant_flattened[i], image_quant_flattened[i].t()))   # [2048, 2048]
-            img_min_encoding_indices = torch.argmin(d1-mask[i], dim=1)
+            img_min_encoding_indices = torch.argmin(d1, dim=1)
             text_min_encoding_indices = torch.argmin(d2, dim=1)
 
             # img_unique_values = torch.unique(img_min_encoding_indices).cpu().numpy().tolist()  # 计算tensor中的唯一值
