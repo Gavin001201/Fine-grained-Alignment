@@ -123,7 +123,7 @@ class CocoBase(Dataset):
             # make it one hot
             n_labels = 183
             flatseg = np.ravel(segmentation)
-            onehot = np.zeros((flatseg.size, n_labels), dtype=np.bool)
+            onehot = np.zeros((flatseg.size, n_labels), dtype=np.bool_)
             onehot[np.arange(flatseg.size), flatseg] = True
             onehot = onehot.reshape(segmentation.shape + (n_labels,)).astype(int)
             segmentation = onehot
