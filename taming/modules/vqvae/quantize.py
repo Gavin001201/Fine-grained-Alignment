@@ -391,12 +391,16 @@ class Cluster(nn.Module):
             text_quant2[i] = image_quant_flattened[i][text_min_encoding_indices]
 
         image_quant2 = image_quant2.view_as(image_quant)
+
+        i_loss = torch.mean((image_quant2.detach() - image_quant)**2) + torch.mean((image_quant2 - image_quant.detach())**2)
+        t_loss = torch.mean((text_quant2.detach() - text_quant)**2) + torch.mean((text_quant2 - text_quant.detach())**2)
+
         image_quant2 = image_quant + (image_quant2 - image_quant).detach()
         text_quant2 = text_quant + (text_quant2 - text_quant).detach()
 
         image_quant2 = image_quant2.permute(0, 3, 1, 2).contiguous()                         #[8, 256, 16, 16]        
 
-        return image_quant2, text_quant2
+        return image_quant2, text_quant2, i_loss, t_loss
     
 class Cluster2(nn.Module):                  #输入输出都是索引形式
     def __init__(self,embedding):       #codebook向量长度

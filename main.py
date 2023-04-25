@@ -241,33 +241,38 @@ class ImageLogger(Callback):
     @rank_zero_only
     def _testtube(self, pl_module, images, batch_idx, split):
         for k in images:
-            grid = torchvision.utils.make_grid(images[k])
-            grid = (grid+1.0)/2.0 # -1,1 -> 0,1; c,h,w
-
             tag = f"{split}/{k}"
-            pl_module.logger.experiment.add_image(
-                tag, grid,
-                global_step=pl_module.global_step)
+            if isinstance(images[k], torch.Tensor):
+                grid = torchvision.utils.make_grid(images[k])
+                grid = (grid+1.0)/2.0 # -1,1 -> 0,1; c,h,w
 
+                pl_module.logger.experiment.add_image(
+                    tag, grid,
+                    global_step=pl_module.global_step)
+            else:
+                pl_module.logger.experiment.add_text(
+                    tag, images[k],
+                    global_step=pl_module.global_step)
     @rank_zero_only
     def log_local(self, save_dir, split, images,
                   global_step, current_epoch, batch_idx):
         root = os.path.join(save_dir, "images", split)
         for k in images:
-            grid = torchvision.utils.make_grid(images[k], nrow=4)
+            if isinstance(images[k], torch.Tensor):
+                grid = torchvision.utils.make_grid(images[k], nrow=4)
 
-            grid = (grid+1.0)/2.0 # -1,1 -> 0,1; c,h,w
-            grid = grid.transpose(0,1).transpose(1,2).squeeze(-1)
-            grid = grid.numpy()
-            grid = (grid*255).astype(np.uint8)
-            filename = "{}_gs-{:06}_e-{:06}_b-{:06}.png".format(
-                k,
-                global_step,
-                current_epoch,
-                batch_idx)
-            path = os.path.join(root, filename)
-            os.makedirs(os.path.split(path)[0], exist_ok=True)
-            Image.fromarray(grid).save(path)
+                grid = (grid+1.0)/2.0 # -1,1 -> 0,1; c,h,w
+                grid = grid.transpose(0,1).transpose(1,2).squeeze(-1)
+                grid = grid.numpy()
+                grid = (grid*255).astype(np.uint8)
+                filename = "{}_gs-{:06}_e-{:06}_b-{:06}.png".format(
+                    k,
+                    global_step,
+                    current_epoch,
+                    batch_idx)
+                path = os.path.join(root, filename)
+                os.makedirs(os.path.split(path)[0], exist_ok=True)
+                Image.fromarray(grid).save(path)
 
     def log_img(self, pl_module, batch, batch_idx, split="train"):
         if (self.check_frequency(batch_idx) and  # batch_idx % self.batch_freq == 0
@@ -284,12 +289,17 @@ class ImageLogger(Callback):
                 images = pl_module.log_images(batch, split=split, pl_module=pl_module)
 
             for k in images:
-                N = min(images[k].shape[0], self.max_images)
-                images[k] = images[k][:N]
                 if isinstance(images[k], torch.Tensor):
-                    images[k] = images[k].detach().cpu()
-                    if self.clamp:
-                        images[k] = torch.clamp(images[k], -1., 1.)
+                    N = min(images[k].shape[0], self.max_images)
+                    images[k] = images[k][:N]
+                    if isinstance(images[k], torch.Tensor):
+                        images[k] = images[k].detach().cpu()
+                        if self.clamp:
+                            images[k] = torch.clamp(images[k], -1., 1.)
+                else:   #文本
+                    N = min(len(images[k]), self.max_images)
+                    images[k] = '####'.join(images[k][:N])
+
 
             self.log_local(pl_module.logger.save_dir, split, images,
                            pl_module.global_step, pl_module.current_epoch, batch_idx)

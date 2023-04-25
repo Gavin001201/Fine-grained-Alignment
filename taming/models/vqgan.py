@@ -19,6 +19,7 @@ from taming.modules.vqvae.quantize import EMAVectorQuantizer
 from taming.modules.transformer.cliptransformer import TextTransformer, Attention
 from taming.modules.vqvae.quantize import Cluster
 from taming.data.base import tokenize
+from taming.modules.tokenizer.simple_tokenizer import SimpleTokenizer as _Tokenizer
 import os
 
 def download_pretrained_from_url(
@@ -214,11 +215,11 @@ class VQModel(pl.LightningModule):
         image_quant, image_q_loss, _ = self.encode(image)
         text_quant,  text_q_loss, _, mask = self.text_encode(text, valid_lens)
 
-        image_quant, text_quant = self.i_t_cluster(image_quant, text_quant, mask, valid_lens)           # [8, 256, 16, 16],  [8, 256, 256]
+        image_quant, text_quant, i_loss, t_loss = self.i_t_cluster(image_quant, text_quant, mask, valid_lens)           # [8, 256, 16, 16],  [8, 256, 256]
 
         i2i_rec, i2t_rec = self.decode(image_quant)              # [8, 3, 256, 256],   [8, 256, 49408]
         t2t_rec, t2i_rec  = self.text_decode(text_quant, valid_lens)        #不是整数, [8, 256, 49408],   [8, 3, 256, 256]
-        return i2i_rec, i2t_rec, image_q_loss,    t2t_rec, t2i_rec, text_q_loss         # q_loss 是文本与图像相互替换时的损失
+        return i2i_rec, i2t_rec, image_q_loss,    t2t_rec, t2i_rec, text_q_loss,  i_loss, t_loss        # q_loss 是文本与图像相互替换时的损失
 
     def get_input(self, batch, k):
         image = batch['image']                                #[8, 256, 256, 3]
@@ -234,11 +235,11 @@ class VQModel(pl.LightningModule):
 
     def training_step(self, batch, batch_idx, optimizer_idx):
         image, text, valid_lens = self.get_input(batch, self.image_key)
-        i2i_rec, i2t_rec, image_q_loss, t2t_rec, t2i_rec, text_q_loss = self(image, text, valid_lens)
+        i2i_rec, i2t_rec, image_q_loss, t2t_rec, t2i_rec, text_q_loss, i_loss, t_loss = self(image, text, valid_lens)
 
         if optimizer_idx == 0:
             # autoencode
-            loss, log_dict = self.loss(image_q_loss, image, i2i_rec, i2t_rec, optimizer_idx, self.global_step, text, t2i_rec, t2t_rec, text_q_loss, valid_lens,  #返回loss和日志形式的字典
+            loss, log_dict = self.loss(image_q_loss, image, i2i_rec, i2t_rec, optimizer_idx, self.global_step, text, t2i_rec, t2t_rec, text_q_loss, valid_lens, i_loss, t_loss,   #返回loss和日志形式的字典
                                             last_layer=self.get_last_layer(), split="train")
 
             self.log("train/loss", loss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
@@ -247,7 +248,7 @@ class VQModel(pl.LightningModule):
 
         if optimizer_idx == 1:
             # discriminator
-            discloss, log_dict_disc = self.loss(image_q_loss, image, i2i_rec, i2t_rec, optimizer_idx, self.global_step, text, t2i_rec, t2t_rec, text_q_loss, valid_lens,
+            discloss, log_dict_disc = self.loss(image_q_loss, image, i2i_rec, i2t_rec, optimizer_idx, self.global_step, text, t2i_rec, t2t_rec, text_q_loss, valid_lens, i_loss, t_loss, 
                                             last_layer=self.get_last_layer(), split="train")
             self.log("train/discloss", discloss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
             self.log_dict(log_dict_disc, prog_bar=False, logger=True, on_step=True, on_epoch=True)
@@ -255,12 +256,12 @@ class VQModel(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         image, text, valid_lens = self.get_input(batch, self.image_key) #torch.Size([3, 3, 256, 256]), torch.Size([3, 1, 77])
-        i2i_rec, i2t_rec, image_q_loss, t2t_rec, t2i_rec, text_q_loss = self(image, text, valid_lens)                           #AE重构图，codebook损失
+        i2i_rec, i2t_rec, image_q_loss, t2t_rec, t2i_rec, text_q_loss, i_loss, t_loss  = self(image, text, valid_lens)                           #AE重构图，codebook损失
 
-        loss, log_dict = self.loss(image_q_loss, image, i2i_rec, i2t_rec, 0, self.global_step, text, t2i_rec, t2t_rec, text_q_loss, valid_lens,      #生成器的验证损失，以及字典形式的损失日志
+        loss, log_dict = self.loss(image_q_loss, image, i2i_rec, i2t_rec, 0, self.global_step, text, t2i_rec, t2t_rec, text_q_loss, valid_lens, i_loss, t_loss,       #生成器的验证损失，以及字典形式的损失日志
                                             last_layer=self.get_last_layer(), split="val")
 
-        discloss, log_dict_disc = self.loss(image_q_loss, image, i2i_rec, i2t_rec, 1, self.global_step, text, t2i_rec, t2t_rec, text_q_loss, valid_lens, #判别器的验证损失日志
+        discloss, log_dict_disc = self.loss(image_q_loss, image, i2i_rec, i2t_rec, 1, self.global_step, text, t2i_rec, t2t_rec, text_q_loss, valid_lens, i_loss, t_loss,  #判别器的验证损失日志
                                             last_layer=self.get_last_layer(), split="val")
         
         #log：像是TensorBoard等log记录器，对于每个log的标量，都会有一个相对应的横坐标，它可能是batch number或epoch number
@@ -294,19 +295,37 @@ class VQModel(pl.LightningModule):
 
     def log_images(self, batch, **kwargs):
         log = dict()
+        ori_text = []
+        for i in range(len(batch['caption'][0])):
+            ori_text.append(batch['caption'][0][i])
         image, text, valid_lens = self.get_input(batch, self.image_key)       #tuple(image, text)
         image = image.to(self.device)
         text = text.to(self.device)
-        i2i_rec, i2t_rec, image_q_loss , t2t_rec, t2i_rec, text_q_loss= self(image, text, valid_lens)
+        i2i_rec, i2t_rec, image_q_loss , t2t_rec, t2i_rec, text_q_loss, i_loss, t_loss = self(image, text, valid_lens)
         if image.shape[1] > 3:
             # colorize with random projection
             assert i2i_rec.shape[1] > 3
             image = self.to_rgb(image)              #图像的原始输入
             i2i_rec = self.to_rgb(i2i_rec)          #图像重建的图像
             t2i_rec = self.to_rgb(t2i_rec)          #文本重建的图像
+        # 文本恢复成自然语言
+        t2t_rec = torch.max(t2t_rec, 2)[1]          #返回最大值的索引
+        i2t_rec = torch.max(i2t_rec, 2)[1]
+        _tokenizer = _Tokenizer()
+        t2t_rec = t2t_rec.cpu().numpy().squeeze().tolist()
+        i2t_rec = i2t_rec.cpu().numpy().squeeze().tolist()
+        t2t = []
+        i2t = []
+        for i in range(len(t2t_rec)):
+            t2t.append(_tokenizer.decode(t2t_rec[i][:int(valid_lens[i])]))
+            i2t.append(_tokenizer.decode(i2t_rec[i][:int(valid_lens[i])]))
+
         log["inputs"] = image                       #[n,3,256,256]
+        log["text_inputs"] = ori_text
         log["i2i_reconstructions"] = i2i_rec        #[n,3,256,256]
         log['t2i_reconstructions'] = t2i_rec
+        log['t2t_reconstructions'] = t2t
+        log['i2t_reconstructions'] = i2t
         return log
 
 

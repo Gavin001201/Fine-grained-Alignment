@@ -93,7 +93,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
         return d_weight                     #那个形而上学的λ
 
     def forward(self, codebook_loss, inputs, reconstructions, i2t_rec, optimizer_idx, global_step,
-                text_input, t2i_rec, text_rec, text_q_loss, valid_lens, last_layer=None, cond=None, split="train"):
+                text_input, t2i_rec, text_rec, text_q_loss, valid_lens, i_cross_q_loss, t_cross_q_loss, last_layer=None, cond=None, split="train"):
         # image part
         rec_loss = torch.abs(inputs.contiguous() - reconstructions.contiguous())                #图像->图像  [8, 3, 256, 256])
         t2i_rec_loss = torch.abs(inputs.contiguous() - t2i_rec.contiguous())                    #文本->图像  [8, 3, 256, 256])
@@ -147,7 +147,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
             i_loss = (nll_loss + t2i_nll_loss) + d_weight * disc_factor * (g_loss + t2i_g_loss)
             # t_loss = (t2t_rec_loss + i2t_rec_loss) + (text_q_loss.mean() + codebook_loss.mean())
             t_loss = (t2t_rec_loss + i2t_rec_loss)
-            loss = i_loss + t_loss + self.codebook_weight * codebook_loss.mean() + text_q_loss.mean()
+            loss = i_loss + t_loss + self.codebook_weight * codebook_loss.mean() + text_q_loss.mean() + i_cross_q_loss + t_cross_q_loss
             # loss = nll_loss + d_weight * disc_factor * g_loss + self.codebook_weight * codebook_loss.mean()
 
             log = {"{}/total_loss".format(split): loss.clone().detach().mean(),
@@ -168,7 +168,9 @@ class VQLPIPSWithDiscriminator(nn.Module):
                    "{}/text_total_loss".format(split): t_loss.clone().detach().mean(),
                    "{}/text_quant_loss".format(split): text_q_loss.detach().mean(),
                    "{}/t2t_rec_loss".format(split): t2t_rec_loss.detach().mean(),
-                   "{}/i2t_rec_loss".format(split): i2t_rec_loss.detach().mean()
+                   "{}/i2t_rec_loss".format(split): i2t_rec_loss.detach().mean(),
+                   "{}/image_cross_quant_loss".format(split): i_cross_q_loss.detach().mean(),
+                   "{}/text_cross_quant_loss".format(split): t_cross_q_loss.detach().mean()
                    }
             return loss, log
 
