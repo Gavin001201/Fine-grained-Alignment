@@ -12,7 +12,7 @@ import urllib
 
 from main import instantiate_from_config
 
-from taming.modules.diffusionmodules.model import Encoder, Decoder
+from taming.modules.diffusionmodules.model import Encoder, Decoder, Text_Decoder
 from taming.modules.vqvae.quantize import VectorQuantizer2 as VectorQuantizer
 from taming.modules.vqvae.quantize import GumbelQuantize
 from taming.modules.vqvae.quantize import EMAVectorQuantizer
@@ -20,6 +20,7 @@ from taming.modules.transformer.cliptransformer import TextTransformer, Attentio
 from taming.modules.vqvae.quantize import Cluster
 from taming.data.base import tokenize
 from taming.modules.tokenizer.simple_tokenizer import SimpleTokenizer as _Tokenizer
+from torch.optim.lr_scheduler import StepLR
 import os
 
 def download_pretrained_from_url(
@@ -101,6 +102,7 @@ def resize_pos_embed(state_dict, pos_embed_width):
     pos_emb = pos_emb.permute(0, 2, 1).squeeze()
     state_dict['positional_embedding'] = pos_emb
 
+
 class VQModel(pl.LightningModule):
     def __init__(self,
                  ddconfig,
@@ -135,9 +137,14 @@ class VQModel(pl.LightningModule):
             self.register_buffer("colorize", torch.randn(3, colorize_nlabels, 1, 1))
         # 文本侧
         self.text_encoder = TextTransformer(**ctconfig)
-        self.quant_W = nn.Linear(ctconfig["width"], embed_dim)       # 从文本侧的宽度映射到coodbook的宽度
-        self.post_quant_W = nn.Sequential(nn.Linear(embed_dim, embed_dim),           # 全连接以实现self-attention
-                                          nn.ReLU())
+        self.text_decoder = Text_Decoder(ctconfig["vocab_size"])  # 图像与文本侧解码器部分共用
+        self.quant_W = nn.Sequential(nn.Linear(ctconfig["width"], ctconfig["width"]),       # 从文本侧的宽度映射到coodbook的宽度
+                                     nn.ReLU(),
+                                     nn.Linear(ctconfig["width"], ctconfig["width"]),
+                                     nn.ReLU(),
+                                     nn.Linear(ctconfig["width"], embed_dim))
+        self.quant_W2 = nn.TransformerDecoder(nn.TransformerDecoderLayer(d_model=256, nhead=8), num_layers=6)
+        self.post_quant_W = nn.TransformerEncoder(nn.TransformerEncoderLayer(d_model=256, nhead=8), num_layers=6)
         # self.post_quant_W = Attention(dim=embed_dim, context_length=ctconfig["context_length"], num_heads=4)
         if ct_ckpt_dir is not None:
             self.init_from_ct_ckpt(ct_ckpt_dir, self.text_encoder, ctconfig["context_length"], ignore_keys=ignore_keys)
@@ -174,16 +181,16 @@ class VQModel(pl.LightningModule):
     # 图像侧
     def encode(self, x):
         h = self.encoder(x)
-        h = self.quant_conv(h)
-        quant, emb_loss, info = self.quantize(h, key='image')
-        return quant, emb_loss, info
+        image_hidden = self.quant_conv(h)
+        quant, emb_loss, info = self.quantize(image_hidden, key='image')
+        return quant, emb_loss, info, image_hidden
 
-    def decode(self, quant):
+    def decode(self, quant, text_hidden):
         quant = self.post_quant_conv(quant)
         #图像->图像
-        i2i_rec = self.decoder(quant)                      # [8, 3, 256, 256]
+        i2i_rec, hidden = self.decoder(quant)                      # [8, 3, 256, 256]
         #图像->文本
-        i2t_rec = self.decoder(quant, key='text')     # [8, 256, 49408])
+        i2t_rec = self.text_decoder(hidden, text_hidden)     # [8, 256, 49408]
         return i2i_rec, i2t_rec
 
     def decode_code(self, code_b):
@@ -192,33 +199,37 @@ class VQModel(pl.LightningModule):
         return dec
 
     #文本侧
-    def text_encode(self, x, valid_lens):
+    def text_encode(self, x, valid_lens, image_hidden):
+        image_hidden = image_hidden.reshape(image_hidden.size(0), image_hidden.size(1), -1)
+        image_hidden = image_hidden.permute(2, 0, 1)
         h, mask = self.text_encoder(x, valid_lens)              #[bs, l, d]  [8, 256, 256], mask在图像替换时使用
-        h = self.quant_W(h)
+        h = self.quant_W(h).permute(1, 0, 2)
+        h = self.quant_W2(tgt=h, memory=image_hidden).permute(1, 0, 2)
         quant, q_loss, codebook_indices = self.quantize(h, key='text')     #quant: [8, 256, 256]
-        return quant, q_loss, codebook_indices, mask
+        return quant, q_loss, codebook_indices, h, mask
 
-    def text_decode(self, quant, valid_lens):             # [bs, l, d]  [8, 256, 256]
-        quant = quant.permute(0, 2, 1)        # [bs, d, l]  [8, 256, 256]
+    def text_decode(self, quant, valid_lens, text_hidden):             # [bs, l, d]  [8, 256, 256]
+        quant = quant.permute(1, 0, 2)                    # [l, bs, d]
         # quant = self.post_quant_W(quant, attn_mask=None, valid_lens=valid_lens)
-        quant = self.post_quant_W(quant)      # 这里以全连接实现 self-attention
-        quant = quant.reshape(quant.size(0), quant.size(1), 16, 16)             #[bs, d, H, W],   [8, 256, 16, 16]
-
-        #文本->文本
-        t2t_rec = self.decoder(quant, key='text')                              # [8, 256, 49408]
+        quant = self.post_quant_W(quant)      # self-attention
+        quant = quant.permute(1, 2, 0)                    # [8, 256, 256], [bs, d, l]
+        quant = quant.reshape(quant.size(0), quant.size(1), 16, 16) # [8, 256, 16, 16]
 
         #文本->图像
-        t2i_rec = self.decoder(quant)
+        t2i_rec, hidden = self.decoder(quant)
+        #文本->文本
+        t2t_rec = self.text_decoder(hidden, text_hidden)                              # [8, 256, 49408]
+
         return t2t_rec, t2i_rec
     
     def forward(self, image, text, valid_lens):
-        image_quant, image_q_loss, _ = self.encode(image)
-        text_quant,  text_q_loss, _, mask = self.text_encode(text, valid_lens)
+        image_quant, image_q_loss, _, image_hidden = self.encode(image)
+        text_quant,  text_q_loss, _, text_hidden, mask = self.text_encode(text, valid_lens, image_hidden)
 
         image_quant, text_quant, i_loss, t_loss = self.i_t_cluster(image_quant, text_quant, mask, valid_lens)           # [8, 256, 16, 16],  [8, 256, 256]
 
-        i2i_rec, i2t_rec = self.decode(image_quant)              # [8, 3, 256, 256],   [8, 256, 49408]
-        t2t_rec, t2i_rec  = self.text_decode(text_quant, valid_lens)        #不是整数, [8, 256, 49408],   [8, 3, 256, 256]
+        i2i_rec, i2t_rec = self.decode(image_quant, text_hidden)              # [8, 3, 256, 256],   [8, 256, 49408]
+        t2t_rec, t2i_rec  = self.text_decode(text_quant, valid_lens, text_hidden)        #不是整数, [8, 256, 49408],   [8, 3, 256, 256]
         return i2i_rec, i2t_rec, image_q_loss,    t2t_rec, t2i_rec, text_q_loss,  i_loss, t_loss        # q_loss 是文本与图像相互替换时的损失
 
     def get_input(self, batch, k):
@@ -272,22 +283,76 @@ class VQModel(pl.LightningModule):
                    prog_bar=True, logger=True, on_step=False, on_epoch=True, sync_dist=True)             
         self.log_dict(log_dict)              #log_dict：和log函数唯一的区别就是，name和value变量由一个字典替换。表示同时log多个值
         self.log_dict(log_dict_disc)
-        return self.log_dict                    #没有返回值限制，不一定非要输出一个val_loss
+        return self.log_dict                    #没有返回值限制，不一定非要输出一个val_loss    
+
+    @staticmethod
+    def set_bn_eval(module):
+        if isinstance(module, nn.BatchNorm2d):
+            module.eval()
+
+    def freeze(self, module):
+        for name, param in module.named_parameters():
+            param.requires_grad = False
+            
+    # def on_train_start(self):
+    #     self.freeze(self.encoder)
+    #     self.encoder.apply(self.set_bn_eval)
+
+    #     self.freeze(self.decoder)
+    #     self.decoder.apply(self.set_bn_eval)
+    #     for name, param in self.decoder.text_linear_out.named_parameters():
+    #         param.requires_grad = True
+    #     for name, param in self.decoder.text_mlp_out.named_parameters():
+    #         param.requires_grad = True
+
+    #     self.freeze(self.quantize)
+    #     self.quantize.apply(self.set_bn_eval)
+
+    #     self.freeze(self.quant_conv)
+    #     self.quant_conv.apply(self.set_bn_eval)
+
+    #     self.freeze(self.post_quant_conv)
+    #     self.post_quant_conv.apply(self.set_bn_eval)
+
+    #     self.freeze(self.text_encoder)
+    #     self.text_encoder.apply(self.set_bn_eval)
 
     def configure_optimizers(self):
         lr = self.learning_rate
-        opt_vq = torch.optim.Adam(list(self.encoder.parameters())+
-                                  list(self.decoder.parameters())+
-                                  list(self.quantize.parameters())+
-                                  list(self.quant_conv.parameters())+
-                                  list(self.post_quant_conv.parameters())+
-                                  list(self.text_encoder.parameters())+
-                                  list(self.quant_W.parameters())+
-                                  list(self.post_quant_W.parameters()),
-                                  lr=lr, betas=(0.5, 0.9))
+        self.freeze(self.encoder)
+        self.encoder.apply(self.set_bn_eval)
+
+        self.freeze(self.decoder)
+        self.decoder.apply(self.set_bn_eval)
+        for name, param in self.decoder.conv_out.named_parameters():
+            param.requires_grad = True     
+
+        # self.freeze(self.quantize)
+        # self.quantize.apply(self.set_bn_eval)
+
+        self.freeze(self.quant_conv)
+        self.quant_conv.apply(self.set_bn_eval)
+
+        # self.freeze(self.post_quant_conv)
+        # self.post_quant_conv.apply(self.set_bn_eval)
+
+        self.freeze(self.text_encoder)
+        self.text_encoder.apply(self.set_bn_eval)
+
+        # 获取需要更新的参数
+        opt_vq_params = []
+        opt_disc_params = []
+        for name, param in self.named_parameters():
+            if param.requires_grad:
+                # 将参数分别添加到对应的优化器参数列表中
+                if name.startswith('loss.discriminator'):
+                    opt_disc_params.append(param)
+                else:
+                    opt_vq_params.append(param)
+
+        opt_vq = torch.optim.Adam(opt_vq_params,lr=lr, betas=(0.5, 0.9))
+        opt_disc = torch.optim.Adam(opt_disc_params,lr=lr, betas=(0.5, 0.9))
         
-        opt_disc = torch.optim.Adam(self.loss.discriminator.parameters(),
-                                    lr=lr, betas=(0.5, 0.9))        
         return [opt_vq, opt_disc], []
 
     def get_last_layer(self):
@@ -302,6 +367,12 @@ class VQModel(pl.LightningModule):
         image = image.to(self.device)
         text = text.to(self.device)
         i2i_rec, i2t_rec, image_q_loss , t2t_rec, t2i_rec, text_q_loss, i_loss, t_loss = self(image, text, valid_lens)
+        ###
+        image_quant2, _, _, image_hidden = self.encode(image)
+        text_quant2, _, _, text_hidden, _ = self.text_encode(text, valid_lens, image_hidden)
+        i2i_no_cq_rec, _ = self.decode(image_quant2, text_hidden)
+        _, t2i_no_cq_rec = self.text_decode(text_quant2, valid_lens, text_hidden)
+        ###
         if image.shape[1] > 3:
             # colorize with random projection
             assert i2i_rec.shape[1] > 3
@@ -312,7 +383,7 @@ class VQModel(pl.LightningModule):
         t2t_rec = torch.max(t2t_rec, 2)[1]          #返回最大值的索引
         i2t_rec = torch.max(i2t_rec, 2)[1]
         _tokenizer = _Tokenizer()
-        t2t_rec = t2t_rec.cpu().numpy().squeeze().tolist()
+        t2t_rec = t2t_rec.cpu().numpy().tolist()
         i2t_rec = i2t_rec.cpu().numpy().squeeze().tolist()
         t2t = []
         i2t = []
@@ -326,6 +397,10 @@ class VQModel(pl.LightningModule):
         log['t2i_reconstructions'] = t2i_rec
         log['t2t_reconstructions'] = t2t
         log['i2t_reconstructions'] = i2t
+        ###
+        log['i2i_no_cq_rec'] = i2i_no_cq_rec
+        log['t2i_no_cq_rec'] = t2i_no_cq_rec
+        ###        
         return log
 
 

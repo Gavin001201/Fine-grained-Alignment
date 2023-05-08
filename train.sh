@@ -13,4 +13,4 @@ mkdir logs/coco_ckpt
 # unzip -d ./data/coco annotations_trainval2017.zip
 # unzip -d ./data/cocostuffthings stuffthingmaps_trainval2017.zip
 
-python main.py --base configs/custom_vqgan.yaml -t True --gpus 0,1 -n "_实验三former-attention"
+python main.py --base configs/custom_vqgan.yaml -t True --gpus 0, -n "_实验八"

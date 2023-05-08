@@ -435,7 +435,7 @@ class Encoder(nn.Module):
 class Decoder(nn.Module):
     def __init__(self, *, ch, out_ch, ch_mult=(1,2,4,8), num_res_blocks,
                  attn_resolutions, dropout=0.0, resamp_with_conv=True, in_channels,
-                 resolution, z_channels, give_pre_end=False, vocab_size=None, **ignorekwargs):
+                 resolution, z_channels, give_pre_end=False, **ignorekwargs):
         super().__init__()
         self.ch = ch
         self.temb_ch = 0
@@ -444,7 +444,6 @@ class Decoder(nn.Module):
         self.resolution = resolution
         self.in_channels = in_channels
         self.give_pre_end = give_pre_end
-        self.vocabsize = vocab_size
 
         # compute in_ch_mult, block_in and curr_res at lowest res
         in_ch_mult = (1,)+tuple(ch_mult)
@@ -502,12 +501,6 @@ class Decoder(nn.Module):
                                         kernel_size=3,
                                         stride=1,
                                         padding=1)
-        
-        self.text_linear_out = nn.Linear(block_in, self.vocabsize)
-        self.text_mlp_out = nn.Sequential(nn.Linear(256**2, 256),
-                                          nn.ReLU(),
-                                          nn.LayerNorm(256),
-                                          nn.Linear(256, 256))
 
     def forward(self, z, key=None):
         #assert z.shape[1:] == self.z_shape[1:]
@@ -538,17 +531,34 @@ class Decoder(nn.Module):
             return h
 
         h = self.norm_out(h)    # Normalize(block_in),  [8, 128, 256, 256]
-        h = nonlinearity(h)     # x*sigmoid(x),         [8, 128, 256, 256]
-        if key == 'text':
-            h = h.reshape(h.size(0), h.size(1), -1)     # [8, 128, 65536]
-            h = self.text_mlp_out(h).permute(0, 2, 1)   # [8, 256, 128]
-            h = self.text_linear_out(h)                 # [8, 256, 49408])
-            return h
+        hidden = nonlinearity(h)     # x*sigmoid(x),         [8, 128, 256, 256]
+        h = self.conv_out(hidden)    # [8, 3, 256, 256]
+        return h, hidden
 
-        h = self.conv_out(h)    # [8, 3, 256, 256]
+class Text_Decoder(nn.Module):
+    def __init__(self, vocab_size=None):
+        super().__init__()
+        self.text_conv = nn.Sequential(nn.Conv2d(in_channels=128, out_channels=256, kernel_size=3, stride=2, padding=1),
+                                       nn.Conv2d(in_channels=256, out_channels=256, kernel_size=3, stride=2, padding=1),
+                                       nn.Conv2d(in_channels=256, out_channels=256, kernel_size=3, stride=2, padding=1),
+                                       nn.Conv2d(in_channels=256, out_channels=256, kernel_size=3, stride=2, padding=1))
+        self.vocabsize = vocab_size
+        self.text_linear_out = nn.Sequential(nn.Linear(256, 512),       # 从文本侧的宽度映射到coodbook的宽度
+                                     nn.ReLU(),
+                                     nn.Linear(512, 1024),
+                                     nn.ReLU(),
+                                     nn.Linear(1024, self.vocabsize))
+        self.text_decoder = nn.TransformerDecoder(nn.TransformerDecoderLayer(d_model=256, nhead=8), num_layers=6)
+    def forward(self, hidden, text_hidden):
+        h = self.text_conv(hidden)                       # [8, 256, 16, 16]
+        h = h.reshape(h.size(0), h.size(1), -1)          # [8, 256, 256]
+        target = h.permute(2, 0, 1)                      # [256, 8, 256]
+        text_hidden = text_hidden.permute(1, 0, 2)
+        h = self.text_decoder(target, text_hidden)       # [256, 8, 256]
+        h = h.permute(1, 0, 2)
+        h = self.text_linear_out(h)                      # [8, 256, 49408])
         return h
-
-
+        
 class VUNet(nn.Module):
     def __init__(self, *, ch, out_ch, ch_mult=(1,2,4,8), num_res_blocks,
                  attn_resolutions, dropout=0.0, resamp_with_conv=True,
