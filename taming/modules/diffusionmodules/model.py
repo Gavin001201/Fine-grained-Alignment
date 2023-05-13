@@ -549,12 +549,21 @@ class Text_Decoder(nn.Module):
                                      nn.ReLU(),
                                      nn.Linear(1024, self.vocabsize))
         self.text_decoder = nn.TransformerDecoder(nn.TransformerDecoderLayer(d_model=256, nhead=8), num_layers=6)
+
+    def generate_text_mask(self, tgt_len, max_len):
+        mask = (torch.triu(torch.ones(tgt_len, max_len)) == 1).transpose(0, 1)
+        mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
+        return mask
+    
+
     def forward(self, hidden, text_hidden):
         h = self.text_conv(hidden)                       # [8, 256, 16, 16]
         h = h.reshape(h.size(0), h.size(1), -1)          # [8, 256, 256]
         target = h.permute(2, 0, 1)                      # [256, 8, 256]
         text_hidden = text_hidden.permute(1, 0, 2)
-        h = self.text_decoder(target, text_hidden)       # [256, 8, 256]
+
+        tgt_mask = self.generate_text_mask(target.size(0), target.size(0)).to(target.device)
+        h = self.text_decoder(target, text_hidden, tgt_mask=tgt_mask)       # [256, 8, 256]
         h = h.permute(1, 0, 2)
         h = self.text_linear_out(h)                      # [8, 256, 49408])
         return h
