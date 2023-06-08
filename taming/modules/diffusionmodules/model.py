@@ -543,11 +543,7 @@ class Text_Decoder(nn.Module):
                                        nn.Conv2d(in_channels=256, out_channels=256, kernel_size=3, stride=2, padding=1),
                                        nn.Conv2d(in_channels=256, out_channels=256, kernel_size=3, stride=2, padding=1))
         self.vocabsize = vocab_size
-        self.text_linear_out = nn.Sequential(nn.Linear(256, 512),       # 从文本侧的宽度映射到coodbook的宽度
-                                     nn.ReLU(),
-                                     nn.Linear(512, 1024),
-                                     nn.ReLU(),
-                                     nn.Linear(1024, self.vocabsize))
+        self.text_linear_out = nn.Linear(256, self.vocabsize)       # 从文本侧的宽度映射到coodbook的宽度
         self.text_decoder = nn.TransformerDecoder(nn.TransformerDecoderLayer(d_model=256, nhead=8), num_layers=6)
 
     def generate_text_mask(self, tgt_len, max_len):

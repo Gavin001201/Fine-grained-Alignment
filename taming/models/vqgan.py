@@ -138,14 +138,9 @@ class VQModel(pl.LightningModule):
         # 文本侧
         self.text_encoder = TextTransformer(**ctconfig)
         self.text_decoder = Text_Decoder(ctconfig["vocab_size"])  # 图像与文本侧解码器部分共用
-        self.quant_W = nn.Sequential(nn.Linear(ctconfig["width"], ctconfig["width"]),       # 从文本侧的宽度映射到coodbook的宽度
-                                     nn.ReLU(),
-                                     nn.Linear(ctconfig["width"], ctconfig["width"]),
-                                     nn.ReLU(),
-                                     nn.Linear(ctconfig["width"], embed_dim))
+        self.quant_W = nn.Linear(ctconfig["width"], embed_dim)       # 从文本侧的宽度映射到coodbook的宽度
         self.quant_W2 = nn.TransformerDecoder(nn.TransformerDecoderLayer(d_model=256, nhead=8), num_layers=6)
-        self.post_quant_W = nn.TransformerEncoder(nn.TransformerEncoderLayer(d_model=256, nhead=8), num_layers=6)
-        # self.post_quant_W = Attention(dim=embed_dim, context_length=ctconfig["context_length"], num_heads=4)
+        self.post_quant_W = nn.TransformerEncoder(nn.TransformerEncoderLayer(d_model=256, nhead=8), num_layers=2)
         if ct_ckpt_dir is not None:
             self.init_from_ct_ckpt(ct_ckpt_dir, self.text_encoder, ctconfig["context_length"], ignore_keys=ignore_keys)
         #图像与文本交叉量化
@@ -294,50 +289,28 @@ class VQModel(pl.LightningModule):
         for name, param in module.named_parameters():
             param.requires_grad = False
             
-    # def on_train_start(self):
-    #     self.freeze(self.encoder)
-    #     self.encoder.apply(self.set_bn_eval)
-
-    #     self.freeze(self.decoder)
-    #     self.decoder.apply(self.set_bn_eval)
-    #     for name, param in self.decoder.text_linear_out.named_parameters():
-    #         param.requires_grad = True
-    #     for name, param in self.decoder.text_mlp_out.named_parameters():
-    #         param.requires_grad = True
-
-    #     self.freeze(self.quantize)
-    #     self.quantize.apply(self.set_bn_eval)
-
-    #     self.freeze(self.quant_conv)
-    #     self.quant_conv.apply(self.set_bn_eval)
-
-    #     self.freeze(self.post_quant_conv)
-    #     self.post_quant_conv.apply(self.set_bn_eval)
-
-    #     self.freeze(self.text_encoder)
-    #     self.text_encoder.apply(self.set_bn_eval)
 
     def configure_optimizers(self):
         lr = self.learning_rate
-        self.freeze(self.encoder)
-        self.encoder.apply(self.set_bn_eval)
+        # self.freeze(self.encoder)
+        # self.encoder.apply(self.set_bn_eval)
 
-        self.freeze(self.decoder)
-        self.decoder.apply(self.set_bn_eval)
-        for name, param in self.decoder.conv_out.named_parameters():
-            param.requires_grad = True     
+        # self.freeze(self.decoder)
+        # self.decoder.apply(self.set_bn_eval)
+        # for name, param in self.decoder.conv_out.named_parameters():
+        #     param.requires_grad = True     
 
         # self.freeze(self.quantize)
         # self.quantize.apply(self.set_bn_eval)
 
-        self.freeze(self.quant_conv)
-        self.quant_conv.apply(self.set_bn_eval)
+        # self.freeze(self.quant_conv)
+        # self.quant_conv.apply(self.set_bn_eval)
 
         # self.freeze(self.post_quant_conv)
         # self.post_quant_conv.apply(self.set_bn_eval)
 
-        self.freeze(self.text_encoder)
-        self.text_encoder.apply(self.set_bn_eval)
+        # self.freeze(self.text_encoder)
+        # self.text_encoder.apply(self.set_bn_eval)
 
         # 获取需要更新的参数
         opt_vq_params = []
