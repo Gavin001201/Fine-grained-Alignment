@@ -138,9 +138,9 @@ class VQModel(pl.LightningModule):
         # 文本侧
         self.text_encoder = TextTransformer(**ctconfig)
         self.text_decoder = Text_Decoder(ctconfig["vocab_size"])  # 图像与文本侧解码器部分共用
-        self.quant_W = nn.Linear(ctconfig["width"], embed_dim)       # 从文本侧的宽度映射到coodbook的宽度
-        self.quant_W2 = nn.TransformerDecoder(nn.TransformerDecoderLayer(d_model=256, nhead=8), num_layers=6)
-        self.post_quant_W = nn.TransformerEncoder(nn.TransformerEncoderLayer(d_model=256, nhead=8), num_layers=2)
+        self.quant_linear = nn.Linear(ctconfig["width"], embed_dim)       # 从文本侧的宽度映射到coodbook的宽度
+        self.quant_tf = nn.TransformerDecoder(nn.TransformerDecoderLayer(d_model=256, nhead=8), num_layers=6)
+        self.post_quant_tf = nn.TransformerEncoder(nn.TransformerEncoderLayer(d_model=256, nhead=8), num_layers=2)
         if ct_ckpt_dir is not None:
             self.init_from_ct_ckpt(ct_ckpt_dir, self.text_encoder, ctconfig["context_length"], ignore_keys=ignore_keys)
         #图像与文本交叉量化
@@ -198,15 +198,15 @@ class VQModel(pl.LightningModule):
         image_hidden = image_hidden.reshape(image_hidden.size(0), image_hidden.size(1), -1)
         image_hidden = image_hidden.permute(2, 0, 1)
         h, mask = self.text_encoder(x, valid_lens)              #[bs, l, d]  [8, 256, 256], mask在图像替换时使用
-        h = self.quant_W(h).permute(1, 0, 2)
-        h = self.quant_W2(tgt=h, memory=image_hidden).permute(1, 0, 2)
+        h = self.quant_linear(h).permute(1, 0, 2)
+        h = self.quant_tf(tgt=h, memory=image_hidden).permute(1, 0, 2)
         quant, q_loss, codebook_indices = self.quantize(h, key='text')     #quant: [8, 256, 256]
         return quant, q_loss, codebook_indices, h, mask
 
     def text_decode(self, quant, valid_lens, text_hidden):             # [bs, l, d]  [8, 256, 256]
         quant = quant.permute(1, 0, 2)                    # [l, bs, d]
         # quant = self.post_quant_W(quant, attn_mask=None, valid_lens=valid_lens)
-        quant = self.post_quant_W(quant)      # self-attention
+        quant = self.post_quant_tf(quant)      # self-attention
         quant = quant.permute(1, 2, 0)                    # [8, 256, 256], [bs, d, l]
         quant = quant.reshape(quant.size(0), quant.size(1), 16, 16) # [8, 256, 16, 16]
 
