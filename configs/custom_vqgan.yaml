@@ -6,6 +6,7 @@ model:
     ct_ckpt_dir: logs/ct_ckpt_path/clip
     embed_dim: 256
     n_embed: 8192
+    monitor: val/total_loss
     ddconfig:
       double_z: False
       z_channels: 256
