@@ -47,7 +47,10 @@ class CocoBase(Dataset):
         assert data_json.split("/")[-1] in ["captions_train2017.json",
                                             "captions_val2017.json"]
         if self.stuffthing:
-            self.segmentation_prefix = ("data/cocostuffthings/train2017")
+            self.segmentation_prefix = (
+                "data/cocostuffthings/val2017" if
+                data_json.endswith("captions_val2017.json") else
+                "data/cocostuffthings/train2017")
         else:
             self.segmentation_prefix = (
                 "data/coco/annotations/stuff_val2017_pixelmaps" if
@@ -71,8 +74,7 @@ class CocoBase(Dataset):
         capdirs = self.json_data["annotations"]
         for capdir in tqdm(capdirs, desc="ImgToCaptions"):
             # there are in average 5 captions per image
-            if capdir["image_id"] in self.img_id_to_captions.keys():
-                self.img_id_to_captions[capdir["image_id"]].append(np.array([capdir["caption"]]))
+            self.img_id_to_captions[capdir["image_id"]].append(np.array([capdir["caption"]]))
 
         self.rescaler = albumentations.SmallestMaxSize(max_size=self.size)
         if self.split=="validation":
@@ -164,7 +166,7 @@ class CocoImagesAndCaptionsValidation(CocoBase):
     def __init__(self, size, onehot_segmentation=False, use_stuffthing=False, crop_size=None, force_no_crop=False,
                  given_files=None):
         super().__init__(size=size,
-                         dataroot="data/coco/train2017",
+                         dataroot="data/coco/val2017",
                          datajson="data/coco/annotations/captions_val2017.json",
                          onehot_segmentation=onehot_segmentation,
                          use_stuffthing=use_stuffthing, crop_size=crop_size, force_no_crop=force_no_crop,
