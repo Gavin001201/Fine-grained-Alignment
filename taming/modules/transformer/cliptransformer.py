@@ -302,7 +302,7 @@ class TextTransformer(nn.Module):
         additive_mask = torch.empty(pad_mask.shape, dtype=cast_dtype, device=attn_mask.device)
         additive_mask.fill_(0)
         additive_mask.masked_fill_(~pad_mask, float("-inf"))                        # [8, 1, 256]
-        mask = additive_mask.squeeze()
+        mask = additive_mask.squeeze(1)
         additive_mask = torch.repeat_interleave(additive_mask, self.heads, 0)       # [64, 1, 256]
         additive_mask = torch.repeat_interleave(additive_mask, text.shape[1], 1)    # [64, 256, 256]
         attn_mask = torch.zeros_like(additive_mask)

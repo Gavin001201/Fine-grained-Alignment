@@ -406,7 +406,7 @@ class Cluster(nn.Module):
 
         image_quant2 = image_quant2.permute(0, 3, 1, 2).contiguous()                         #[8, 256, 16, 16]        
 
-        return image_quant2, text_quant2, i_loss, t_loss
+        return image_quant2, text_quant2, i_loss, t_loss, img_min_encoding_indices
     
 class Cluster2(nn.Module):                  #输入输出都是索引形式
     def __init__(self,embedding):       #codebook向量长度

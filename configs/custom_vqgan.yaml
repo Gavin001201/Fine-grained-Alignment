@@ -2,8 +2,8 @@ model:
   base_learning_rate: 4.5e-6
   target: taming.models.vqgan.VQModel
   params:
-    ckpt_path: logs/coco_ckpt/coco_epoch117.ckpt
-    ct_ckpt_dir: logs/ct_ckpt_path/clip
+    ckpt_path: /mnt/workspace/Project/taming-transformers2.0/logs/coco_ckpt/coco_epoch117.ckpt
+    ct_ckpt_dir: /mnt/workspace/Project/taming-transformers2.0/logs/ct_ckpt_path/clip
     embed_dim: 256
     n_embed: 8192
     monitor: val/total_loss
@@ -39,7 +39,7 @@ model:
 data:
   target: main.DataModuleFromConfig
   params:
-    batch_size: 6
+    batch_size: 4
     num_workers: 8
     train:
       target: taming.data.coco.CocoImagesAndCaptionsTrain

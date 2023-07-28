@@ -48,9 +48,9 @@ class CocoBase(Dataset):
                                             "captions_val2017.json"]
         if self.stuffthing:
             self.segmentation_prefix = (
-                "data/cocostuffthings/val2017" if
+                "/mnt/workspace/Project/taming-transformers2.0/data/cocostuffthings/val2017" if
                 data_json.endswith("captions_val2017.json") else
-                "data/cocostuffthings/train2017")
+                "/mnt/workspace/Project/taming-transformers2.0/data/cocostuffthings/train2017")
         else:
             self.segmentation_prefix = (
                 "data/coco/annotations/stuff_val2017_pixelmaps" if
@@ -152,8 +152,8 @@ class CocoImagesAndCaptionsTrain(CocoBase):
     """returns a pair of (image, caption)"""
     def __init__(self, size, onehot_segmentation=False, use_stuffthing=False, crop_size=None, force_no_crop=False):
         super().__init__(size=size,
-                         dataroot="data/coco/train2017",
-                         datajson="data/coco/annotations/captions_train2017.json",
+                         dataroot="/mnt/workspace/Project/taming-transformers2.0/data/coco/train2017",
+                         datajson="/mnt/workspace/Project/taming-transformers2.0/data/coco/annotations/captions_train2017.json",
                          onehot_segmentation=onehot_segmentation,
                          use_stuffthing=use_stuffthing, crop_size=crop_size, force_no_crop=force_no_crop)
 
@@ -166,8 +166,8 @@ class CocoImagesAndCaptionsValidation(CocoBase):
     def __init__(self, size, onehot_segmentation=False, use_stuffthing=False, crop_size=None, force_no_crop=False,
                  given_files=None):
         super().__init__(size=size,
-                         dataroot="data/coco/val2017",
-                         datajson="data/coco/annotations/captions_val2017.json",
+                         dataroot="/mnt/workspace/Project/taming-transformers2.0/data/coco/val2017",
+                         datajson="/mnt/workspace/Project/taming-transformers2.0/data/coco/annotations/captions_val2017.json",
                          onehot_segmentation=onehot_segmentation,
                          use_stuffthing=use_stuffthing, crop_size=crop_size, force_no_crop=force_no_crop,
                          given_files=given_files)
