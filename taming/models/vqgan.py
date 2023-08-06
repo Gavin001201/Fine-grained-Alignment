@@ -139,7 +139,6 @@ class VQModel(pl.LightningModule):
         self.text_encoder = TextTransformer(**ctconfig)
         self.text_decoder = Text_Decoder(ctconfig["vocab_size"])  # 图像与文本侧解码器部分共用
         self.quant_linear = nn.Linear(ctconfig["width"], embed_dim)       # 从文本侧的宽度映射到coodbook的宽度
-        self.quant_tf = nn.TransformerDecoder(nn.TransformerDecoderLayer(d_model=256, nhead=8), num_layers=6)
         self.post_quant_tf = nn.TransformerEncoder(nn.TransformerEncoderLayer(d_model=256, nhead=8), num_layers=2)
         if ct_ckpt_dir is not None:
             self.init_from_ct_ckpt(ct_ckpt_dir, self.text_encoder, ctconfig["context_length"], ignore_keys=ignore_keys)
@@ -180,12 +179,12 @@ class VQModel(pl.LightningModule):
         quant, emb_loss, info = self.quantize(image_hidden, key='image')
         return quant, emb_loss, info, image_hidden
 
-    def decode(self, quant, text_hidden):
+    def decode(self, quant):
         quant = self.post_quant_conv(quant)
         #图像->图像
         i2i_rec, hidden = self.decoder(quant)                      # [8, 3, 256, 256]
         #图像->文本
-        i2t_rec = self.text_decoder(hidden, text_hidden)     # [8, 256, 49408]
+        i2t_rec = self.text_decoder(hidden)     # [8, 256, 49408]
         return i2i_rec, i2t_rec
 
     def decode_code(self, code_b):
@@ -198,12 +197,11 @@ class VQModel(pl.LightningModule):
         image_hidden = image_hidden.reshape(image_hidden.size(0), image_hidden.size(1), -1)
         image_hidden = image_hidden.permute(2, 0, 1)
         h, mask = self.text_encoder(x, valid_lens)              #[bs, l, d]  [8, 256, 256], mask在图像替换时使用
-        h = self.quant_linear(h).permute(1, 0, 2)
-        h = self.quant_tf(tgt=h, memory=image_hidden).permute(1, 0, 2)
+        h = self.quant_linear(h)
         quant, q_loss, codebook_indices = self.quantize(h, key='text')     #quant: [8, 256, 256]
-        return quant, q_loss, codebook_indices, h, mask
+        return quant, q_loss, codebook_indices, mask
 
-    def text_decode(self, quant, valid_lens, text_hidden):             # [bs, l, d]  [8, 256, 256]
+    def text_decode(self, quant, valid_lens):             # [bs, l, d]  [8, 256, 256]
         quant = quant.permute(1, 0, 2)                    # [l, bs, d]
         # quant = self.post_quant_W(quant, attn_mask=None, valid_lens=valid_lens)
         quant = self.post_quant_tf(quant)      # self-attention
@@ -213,18 +211,18 @@ class VQModel(pl.LightningModule):
         #文本->图像
         t2i_rec, hidden = self.decoder(quant)
         #文本->文本
-        t2t_rec = self.text_decoder(hidden, text_hidden)                              # [8, 256, 49408]
+        t2t_rec = self.text_decoder(hidden)                              # [8, 256, 49408]
 
         return t2t_rec, t2i_rec
     
     def forward(self, image, text, valid_lens):
         image_quant, image_q_loss, _, image_hidden = self.encode(image)
-        text_quant,  text_q_loss, _, text_hidden, mask = self.text_encode(text, valid_lens, image_hidden)
+        text_quant,  text_q_loss, _, mask = self.text_encode(text, valid_lens, image_hidden)
 
         image_quant, text_quant, i_loss, t_loss, img_min_encoding_indices = self.i_t_cluster(image_quant, text_quant, mask, valid_lens)           # [8, 256, 16, 16],  [8, 256, 256]
 
-        i2i_rec, i2t_rec = self.decode(image_quant, text_hidden)              # [8, 3, 256, 256],   [8, 256, 49408]
-        t2t_rec, t2i_rec  = self.text_decode(text_quant, valid_lens, text_hidden)        #不是整数, [8, 256, 49408],   [8, 3, 256, 256]
+        i2i_rec, i2t_rec = self.decode(image_quant)              # [8, 3, 256, 256],   [8, 256, 49408]
+        t2t_rec, t2i_rec  = self.text_decode(text_quant, valid_lens)        #不是整数, [8, 256, 49408],   [8, 3, 256, 256]
         return i2i_rec, i2t_rec, image_q_loss,    t2t_rec, t2i_rec, text_q_loss,  i_loss, t_loss        # q_loss 是文本与图像相互替换时的损失
 
     def get_input(self, batch, k):
@@ -342,9 +340,9 @@ class VQModel(pl.LightningModule):
         i2i_rec, i2t_rec, image_q_loss , t2t_rec, t2i_rec, text_q_loss, i_loss, t_loss = self(image, text, valid_lens)
         ###
         image_quant2, _, _, image_hidden = self.encode(image)
-        text_quant2, _, _, text_hidden, _ = self.text_encode(text, valid_lens, image_hidden)
-        i2i_no_cq_rec, _ = self.decode(image_quant2, text_hidden)
-        _, t2i_no_cq_rec = self.text_decode(text_quant2, valid_lens, text_hidden)
+        text_quant2, _, _, _ = self.text_encode(text, valid_lens, image_hidden)
+        i2i_no_cq_rec, _ = self.decode(image_quant2)
+        _, t2i_no_cq_rec = self.text_decode(text_quant2, valid_lens)
         ###
         if image.shape[1] > 3:
             # colorize with random projection
