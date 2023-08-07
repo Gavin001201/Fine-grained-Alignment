@@ -363,7 +363,7 @@ class VQModel(pl.LightningModule):
             image = self.to_rgb(image)              #图像的原始输入
             t2i_rec = self.to_rgb(t2i_rec)          #文本重建的图像
             
-        # 文本恢复成自然语言
+        # 文本 恢复成自然语言
         i2t_rec = torch.max(i2t_rec, 2)[1]          #返回最大值的索引
         i2t_without_quant = torch.max(i2t_without_quant, 2)[1]
         _tokenizer = _Tokenizer()
