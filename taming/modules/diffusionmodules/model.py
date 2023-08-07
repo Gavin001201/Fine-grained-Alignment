@@ -531,36 +531,8 @@ class Decoder(nn.Module):
             return h
 
         h = self.norm_out(h)    # Normalize(block_in),  [8, 128, 256, 256]
-        hidden = nonlinearity(h)     # x*sigmoid(x),         [8, 128, 256, 256]
-        h = self.conv_out(hidden)    # [8, 3, 256, 256]
-        return h, hidden
-
-class Text_Decoder(nn.Module):
-    def __init__(self, vocab_size=None):
-        super().__init__()
-        self.text_conv = nn.Sequential(nn.Conv2d(in_channels=128, out_channels=256, kernel_size=3, stride=2, padding=1),
-                                       nn.Conv2d(in_channels=256, out_channels=256, kernel_size=3, stride=2, padding=1),
-                                       nn.Conv2d(in_channels=256, out_channels=256, kernel_size=3, stride=2, padding=1),
-                                       nn.Conv2d(in_channels=256, out_channels=256, kernel_size=3, stride=2, padding=1))
-        self.vocabsize = vocab_size
-        self.text_linear_out = nn.Linear(256, self.vocabsize)       # 从文本侧的宽度映射到coodbook的宽度
-        self.text_decoder = nn.TransformerDecoder(nn.TransformerDecoderLayer(d_model=256, nhead=8), num_layers=6)
-
-    def generate_text_mask(self, tgt_len, max_len):
-        mask = (torch.triu(torch.ones(tgt_len, max_len)) == 1).transpose(0, 1)
-        mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
-        return mask
-    
-
-    def forward(self, hidden):
-        h = self.text_conv(hidden)                       # [8, 256, 16, 16]
-        h = h.reshape(h.size(0), h.size(1), -1)          # [8, 256, 256]
-        target = h.permute(2, 0, 1)                      # [256, 8, 256]
-
-        tgt_mask = self.generate_text_mask(target.size(0), target.size(0)).to(target.device)
-        h = self.text_decoder(target, target, tgt_mask=tgt_mask)       # [256, 8, 256]
-        h = h.permute(1, 0, 2)
-        h = self.text_linear_out(h)                      # [8, 256, 49408])
+        h = nonlinearity(h)     # x*sigmoid(x),         [8, 128, 256, 256]
+        h = self.conv_out(h)    # [8, 3, 256, 256]
         return h
         
 class VUNet(nn.Module):
@@ -798,4 +770,24 @@ class UpsampleDecoder(nn.Module):
         h = self.norm_out(h)
         h = nonlinearity(h)
         h = self.conv_out(h)
+        return h
+
+class Text_Decoder(nn.Module):
+    def __init__(self, vocab_size=None):
+        super().__init__()
+        self.vocabsize = vocab_size
+        self.text_linear_out = nn.Linear(256, self.vocabsize)       # 从文本侧的宽度映射到coodbook的宽度
+        self.text_decoder = nn.TransformerDecoder(nn.TransformerDecoderLayer(d_model=256, nhead=8), num_layers=6)
+
+    def generate_text_mask(self, tgt_len, max_len):
+        mask = (torch.triu(torch.ones(tgt_len, max_len)) == 1).transpose(0, 1)
+        mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
+        return mask
+    
+    def forward(self, hidden):              # [2, 256, 256]
+        hidden = hidden.permute(1, 0, 2)
+        tgt_mask = self.generate_text_mask(hidden.size(0), hidden.size(0)).to(hidden.device)
+        h = self.text_decoder(hidden, hidden, tgt_mask=tgt_mask)       # [256, 8, 256]
+        h = h.permute(1, 0, 2)
+        h = self.text_linear_out(h)                      # [8, 256, 49408])
         return h

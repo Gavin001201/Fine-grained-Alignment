@@ -280,22 +280,20 @@ class VectorQuantizer2(nn.Module):          #VectorQuantizer 改进的版本
                 torch.sum(self.embedding.weight**2, dim=1) - \
                 2*(torch.matmul(z_flattened, self.embedding.weight.t()))                    # [2048, 8912]
 
-            codebook_indices = torch.argmin(d, dim=1)
-            z_q = self.embedding(codebook_indices).view(z.shape)                            # [8, 256, 256]
+            text_quant_indices = torch.argmin(d, dim=1)
+            z_q = self.embedding(text_quant_indices).view(z.shape)                            # [8, 256, 256]
 
             # similarity_matrix = torch.matmul(z_flattened, self.embedding.weight.t())
 
-            # codebook_indices = torch.argmin(d, dim=1)
-            # z_q = self.embedding(codebook_indices).view(z.shape)
+            # text_quant_indices = torch.argmin(d, dim=1)
+            # z_q = self.embedding(text_quant_indices).view(z.shape)
 
 
             loss = torch.mean((z_q.detach() - z)**2) + self.beta * torch.mean((z_q - z.detach())**2)
 
             z_q = z + (z_q - z).detach()
-
-
-
-            return z_q, loss, codebook_indices
+            
+            return z_q, loss, text_quant_indices
 
 
         elif key == 'image':

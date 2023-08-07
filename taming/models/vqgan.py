@@ -174,18 +174,17 @@ class VQModel(pl.LightningModule):
 
     # 图像侧
     def encode(self, x):
-        h = self.encoder(x)
-        image_hidden = self.quant_conv(h)
-        quant, emb_loss, info = self.quantize(image_hidden, key='image')
-        return quant, emb_loss, info, image_hidden
+        h = self.encoder(x)                 # torch.Size([2, 256, 16, 16])
+        encode_image = self.quant_conv(h)   # torch.Size([2, 256, 16, 16])
+        quant, emb_loss, (perplexity, min_encodings, image_quant_indices) = self.quantize(encode_image, key='image')
+        return encode_image, quant, emb_loss, image_quant_indices
 
     def decode(self, quant):
-        quant = self.post_quant_conv(quant)
-        #图像->图像
-        i2i_rec, hidden = self.decoder(quant)                      # [8, 3, 256, 256]
-        #图像->文本
-        i2t_rec = self.text_decoder(hidden)     # [8, 256, 49408]
-        return i2i_rec, i2t_rec
+        quant = self.post_quant_conv(quant)     # [2, 256, 16, 16]
+        s0, s1 = quant.size(0), quant.size(1)
+        quant = quant.reshape(s0, s1, -1).permute(0, 2, 1)  # [2, 256, 256]
+        i2t_rec = self.text_decoder(quant)     # [8, 256, 49408]
+        return i2t_rec
 
     def decode_code(self, code_b):
         quant_b = self.quantize.embed_code(code_b)
@@ -193,37 +192,47 @@ class VQModel(pl.LightningModule):
         return dec
 
     #文本侧
-    def text_encode(self, x, valid_lens, image_hidden):
-        image_hidden = image_hidden.reshape(image_hidden.size(0), image_hidden.size(1), -1)
-        image_hidden = image_hidden.permute(2, 0, 1)
+    def text_encode(self, x, valid_lens):
         h, mask = self.text_encoder(x, valid_lens)              #[bs, l, d]  [8, 256, 256], mask在图像替换时使用
-        h = self.quant_linear(h)
-        quant, q_loss, codebook_indices = self.quantize(h, key='text')     #quant: [8, 256, 256]
-        return quant, q_loss, codebook_indices, mask
+        encode_text = self.quant_linear(h)
+        quant, q_loss, text_quant_indices = self.quantize(encode_text, key='text')     #quant: [8, 256, 256]
+        return encode_text, quant, q_loss, text_quant_indices, mask
 
     def text_decode(self, quant, valid_lens):             # [bs, l, d]  [8, 256, 256]
         quant = quant.permute(1, 0, 2)                    # [l, bs, d]
-        # quant = self.post_quant_W(quant, attn_mask=None, valid_lens=valid_lens)
-        quant = self.post_quant_tf(quant)      # self-attention
+        quant = self.post_quant_tf(quant)                 # self-attention
         quant = quant.permute(1, 2, 0)                    # [8, 256, 256], [bs, d, l]
         quant = quant.reshape(quant.size(0), quant.size(1), 16, 16) # [8, 256, 16, 16]
-
-        #文本->图像
-        t2i_rec, hidden = self.decoder(quant)
-        #文本->文本
-        t2t_rec = self.text_decoder(hidden)                              # [8, 256, 49408]
-
-        return t2t_rec, t2i_rec
+        t2i_rec = self.decoder(quant)
+        return t2i_rec
     
+    def constrain_loss(self, encode_image, encode_text, image_quant_indices, text_quant_indices):
+        '''对编码器输出结果施加约束'''
+        bs, lenth, dim = encode_text.shape
+        constrain_loss = torch.abs(encode_image.reshape(bs, dim, -1).permute(0, 2, 1).contiguous() - encode_text.contiguous())
+        constrain_loss = torch.mean(constrain_loss, dim=(1, 2), keepdim=True).squeeze(2)
+        coef = []
+        for i in range(bs):
+            list_i = image_quant_indices.tolist()[lenth * i: lenth * (i +1)]
+            list_t = text_quant_indices.tolist()[lenth * i: lenth * (i +1)]
+            list_all = list_i + list_t
+            lenth_i = len(set(list_i))
+            lenth_t = len(set(list_t))
+            lenth_all = len(set(list_all))
+            coef.append(lenth_all /(lenth_i + lenth_t))
+        coef = torch.tensor(coef).to(encode_image.device)
+        c_loss = torch.matmul(coef, constrain_loss).to(encode_image.device)
+        return c_loss
+
     def forward(self, image, text, valid_lens):
-        image_quant, image_q_loss, _, image_hidden = self.encode(image)
-        text_quant,  text_q_loss, _, mask = self.text_encode(text, valid_lens, image_hidden)
+        encode_image, image_quant, image_q_loss, image_quant_indices = self.encode(image)
+        encode_text, text_quant,  text_q_loss, text_quant_indices, mask = self.text_encode(text, valid_lens)
 
-        image_quant, text_quant, i_loss, t_loss, img_min_encoding_indices = self.i_t_cluster(image_quant, text_quant, mask, valid_lens)           # [8, 256, 16, 16],  [8, 256, 256]
+        c_loss = self.constrain_loss(encode_image, encode_text, image_quant_indices, text_quant_indices)
 
-        i2i_rec, i2t_rec = self.decode(image_quant)              # [8, 3, 256, 256],   [8, 256, 49408]
-        t2t_rec, t2i_rec  = self.text_decode(text_quant, valid_lens)        #不是整数, [8, 256, 49408],   [8, 3, 256, 256]
-        return i2i_rec, i2t_rec, image_q_loss,    t2t_rec, t2i_rec, text_q_loss,  i_loss, t_loss        # q_loss 是文本与图像相互替换时的损失
+        i2t_rec = self.decode(image_quant)                # [8, 3, 256, 256],   [8, 256, 49408]
+        t2i_rec  = self.text_decode(text_quant, valid_lens)        #不是整数, [8, 256, 49408],   [8, 3, 256, 256]
+        return i2t_rec, t2i_rec, image_q_loss, text_q_loss, c_loss
 
     def get_input(self, batch, k):
         image = batch['image']                                #[8, 256, 256, 3]
@@ -239,11 +248,11 @@ class VQModel(pl.LightningModule):
 
     def training_step(self, batch, batch_idx, optimizer_idx):
         image, text, valid_lens = self.get_input(batch, self.image_key)
-        i2i_rec, i2t_rec, image_q_loss, t2t_rec, t2i_rec, text_q_loss, i_loss, t_loss = self(image, text, valid_lens)
+        i2t_rec, t2i_rec, image_q_loss, text_q_loss, c_loss = self(image, text, valid_lens)
 
         if optimizer_idx == 0:
             # autoencode
-            loss, log_dict = self.loss(image_q_loss, image, i2i_rec, i2t_rec, optimizer_idx, self.global_step, text, t2i_rec, t2t_rec, text_q_loss, valid_lens, i_loss, t_loss,   #返回loss和日志形式的字典
+            loss, log_dict = self.loss(image, text, i2t_rec, t2i_rec, image_q_loss, text_q_loss, valid_lens, c_loss, optimizer_idx, self.global_step,   #返回loss和日志形式的字典
                                             last_layer=self.get_last_layer(), split="train")
 
             self.log("train/loss", loss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
@@ -252,7 +261,7 @@ class VQModel(pl.LightningModule):
 
         if optimizer_idx == 1:
             # discriminator
-            discloss, log_dict_disc = self.loss(image_q_loss, image, i2i_rec, i2t_rec, optimizer_idx, self.global_step, text, t2i_rec, t2t_rec, text_q_loss, valid_lens, i_loss, t_loss, 
+            discloss, log_dict_disc = self.loss(image, text, i2t_rec, t2i_rec, image_q_loss, text_q_loss, valid_lens, c_loss, optimizer_idx, self.global_step,
                                             last_layer=self.get_last_layer(), split="train")
             self.log("train/discloss", discloss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
             self.log_dict(log_dict_disc, prog_bar=False, logger=True, on_step=True, on_epoch=True)
@@ -260,12 +269,12 @@ class VQModel(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         image, text, valid_lens = self.get_input(batch, self.image_key) #torch.Size([3, 3, 256, 256]), torch.Size([3, 1, 77])
-        i2i_rec, i2t_rec, image_q_loss, t2t_rec, t2i_rec, text_q_loss, i_loss, t_loss  = self(image, text, valid_lens)                           #AE重构图，codebook损失
+        i2t_rec, t2i_rec, image_q_loss, text_q_loss, c_loss  = self(image, text, valid_lens)                           #AE重构图，codebook损失
 
-        loss, log_dict = self.loss(image_q_loss, image, i2i_rec, i2t_rec, 0, self.global_step, text, t2i_rec, t2t_rec, text_q_loss, valid_lens, i_loss, t_loss,       #生成器的验证损失，以及字典形式的损失日志
+        loss, log_dict = self.loss(image, text, i2t_rec, t2i_rec, image_q_loss, text_q_loss, valid_lens, c_loss, 0, self.global_step,       #生成器的验证损失，以及字典形式的损失日志
                                             last_layer=self.get_last_layer(), split="val")
 
-        discloss, log_dict_disc = self.loss(image_q_loss, image, i2i_rec, i2t_rec, 1, self.global_step, text, t2i_rec, t2t_rec, text_q_loss, valid_lens, i_loss, t_loss,  #判别器的验证损失日志
+        discloss, log_dict_disc = self.loss(image, text, i2t_rec, t2i_rec, image_q_loss, text_q_loss, valid_lens, c_loss, 1, self.global_step,   #判别器的验证损失日志
                                             last_layer=self.get_last_layer(), split="val")
         
         #log：像是TensorBoard等log记录器，对于每个log的标量，都会有一个相对应的横坐标，它可能是batch number或epoch number
@@ -287,7 +296,7 @@ class VQModel(pl.LightningModule):
         for name, param in module.named_parameters():
             param.requires_grad = False
             
-
+            
     def configure_optimizers(self):
         lr = self.learning_rate
         # self.freeze(self.encoder)
@@ -332,46 +341,47 @@ class VQModel(pl.LightningModule):
     def log_images(self, batch, **kwargs):
         log = dict()
         ori_text = []
+
         for i in range(len(batch['caption'][0])):
             ori_text.append(batch['caption'][0][i])
         image, text, valid_lens = self.get_input(batch, self.image_key)       #tuple(image, text)
         image = image.to(self.device)
         text = text.to(self.device)
-        i2i_rec, i2t_rec, image_q_loss , t2t_rec, t2i_rec, text_q_loss, i_loss, t_loss = self(image, text, valid_lens)
-        ###
-        image_quant2, _, _, image_hidden = self.encode(image)
-        text_quant2, _, _, _ = self.text_encode(text, valid_lens, image_hidden)
-        i2i_no_cq_rec, _ = self.decode(image_quant2)
-        _, t2i_no_cq_rec = self.text_decode(text_quant2, valid_lens)
-        ###
+
+        i2t_rec, t2i_rec, image_q_loss, text_q_loss, c_loss = self(image, text, valid_lens)
+
+        encode_image, image_quant, image_q_loss, image_quant_indices = self.encode(image)
+        encode_text, text_quant,  text_q_loss, text_quant_indices, mask = self.text_encode(text, valid_lens)
+        i2t_without_quant = self.decode(encode_image)                # [8, 3, 256, 256],   [8, 256, 49408]
+        t2i_without_quant  = self.text_decode(encode_text, valid_lens) 
+
+        i2t_rec = self.decode(image_quant)                # [8, 3, 256, 256],   [8, 256, 49408]
+        t2i_rec  = self.text_decode(text_quant, valid_lens)
         if image.shape[1] > 3:
             # colorize with random projection
             assert i2i_rec.shape[1] > 3
             image = self.to_rgb(image)              #图像的原始输入
-            i2i_rec = self.to_rgb(i2i_rec)          #图像重建的图像
             t2i_rec = self.to_rgb(t2i_rec)          #文本重建的图像
+            
         # 文本恢复成自然语言
-        t2t_rec = torch.max(t2t_rec, 2)[1]          #返回最大值的索引
-        i2t_rec = torch.max(i2t_rec, 2)[1]
+        i2t_rec = torch.max(i2t_rec, 2)[1]          #返回最大值的索引
+        i2t_without_quant = torch.max(i2t_without_quant, 2)[1]
         _tokenizer = _Tokenizer()
-        t2t_rec = t2t_rec.cpu().numpy().tolist()
         i2t_rec = i2t_rec.cpu().numpy().squeeze().tolist()
-        t2t = []
+        i2t_without_quant = i2t_without_quant.cpu().numpy().squeeze().tolist()
         i2t = []
-        for i in range(len(t2t_rec)):
-            t2t.append(_tokenizer.decode(t2t_rec[i][:int(valid_lens[i])]))
+        i2t_no_cq = []
+        for i in range(len(i2t_rec)):
             i2t.append(_tokenizer.decode(i2t_rec[i][:int(valid_lens[i])]))
+            i2t_no_cq.append(_tokenizer.decode(i2t_without_quant[i][:int(valid_lens[i])]))
 
-        log["inputs"] = image                       #[n,3,256,256]
+        log["image_inputs"] = image                       #[n,3,256,256]
         log["text_inputs"] = ori_text
-        log["i2i_reconstructions"] = i2i_rec        #[n,3,256,256]
         log['t2i_reconstructions'] = t2i_rec
-        log['t2t_reconstructions'] = t2t
+        log['t2i_without_quant'] = t2i_without_quant
         log['i2t_reconstructions'] = i2t
-        ###
-        log['i2i_no_cq_rec'] = i2i_no_cq_rec
-        log['t2i_no_cq_rec'] = t2i_no_cq_rec
-        ###        
+        log['i2t_without_quant'] = i2t_no_cq
+
         return log
 
 
