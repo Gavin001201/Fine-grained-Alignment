@@ -293,8 +293,6 @@ class VectorQuantizer2(nn.Module):          #VectorQuantizer 改进的版本
 
             z_q = z + (z_q - z).detach()
 
-
-
             return z_q, loss, codebook_indices
 
 
@@ -398,15 +396,15 @@ class Cluster(nn.Module):
 
         image_quant2 = image_quant2.view_as(image_quant)
 
-        i_loss = torch.mean((image_quant2.detach() - image_quant)**2) + torch.mean((image_quant2 - image_quant.detach())**2)
-        t_loss = torch.mean((text_quant2.detach() - text_quant)**2) + torch.mean((text_quant2 - text_quant.detach())**2)
+        i_coquant_loss = torch.mean((image_quant2.detach() - image_quant)**2) + torch.mean((image_quant2 - image_quant.detach())**2)
+        t_coquant_loss = torch.mean((text_quant2.detach() - text_quant)**2) + torch.mean((text_quant2 - text_quant.detach())**2)
 
-        image_quant2 = image_quant + (image_quant2 - image_quant).detach()
-        text_quant2 = text_quant + (text_quant2 - text_quant).detach()
+        image_coquant = image_quant + (image_quant2 - image_quant).detach()
+        text_coquant = text_quant + (text_quant2 - text_quant).detach()
 
-        image_quant2 = image_quant2.permute(0, 3, 1, 2).contiguous()                         #[8, 256, 16, 16]        
+        image_coquant = image_coquant.permute(0, 3, 1, 2).contiguous()                         #[8, 256, 16, 16]        
 
-        return image_quant2, text_quant2, i_loss, t_loss
+        return image_coquant, text_coquant, i_coquant_loss, t_coquant_loss
     
 class Cluster2(nn.Module):                  #输入输出都是索引形式
     def __init__(self,embedding):       #codebook向量长度

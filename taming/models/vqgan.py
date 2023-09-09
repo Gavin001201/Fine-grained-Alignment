@@ -177,15 +177,15 @@ class VQModel(pl.LightningModule):
     def encode(self, x):
         h = self.encoder(x)
         image_hidden = self.quant_conv(h)
-        quant, emb_loss, info = self.quantize(image_hidden, key='image')
-        return quant, emb_loss, info, image_hidden
+        image_quant, image_quant_loss, info = self.quantize(image_hidden, key='image')
+        return image_quant, image_quant_loss, info, image_hidden
 
-    def decode(self, quant, text_hidden):
-        quant = self.post_quant_conv(quant)
+    def decode(self, image_coquant):
+        image_coquant = self.post_quant_conv(image_coquant)
         #图像->图像
-        i2i_rec, hidden = self.decoder(quant)                      # [8, 3, 256, 256]
+        i2i_rec, image_hidden = self.decoder(image_coquant)                      # [8, 3, 256, 256]
         #图像->文本
-        i2t_rec = self.text_decoder(hidden, text_hidden)     # [8, 256, 49408]
+        i2t_rec = self.text_decoder(image_hidden)     # [8, 256, 49408]
         return i2i_rec, i2t_rec
 
     def decode_code(self, code_b):
@@ -194,38 +194,38 @@ class VQModel(pl.LightningModule):
         return dec
 
     #文本侧
-    def text_encode(self, x, valid_lens, image_hidden):
+    def text_encode(self, text, valid_lens, image_hidden):
         image_hidden = image_hidden.reshape(image_hidden.size(0), image_hidden.size(1), -1)
         image_hidden = image_hidden.permute(2, 0, 1)
-        h, mask = self.text_encoder(x, valid_lens)              #[bs, l, d]  [8, 256, 256], mask在图像替换时使用
-        h = self.quant_linear(h).permute(1, 0, 2)
-        h = self.quant_tf(tgt=h, memory=image_hidden).permute(1, 0, 2)
-        quant, q_loss, codebook_indices = self.quantize(h, key='text')     #quant: [8, 256, 256]
-        return quant, q_loss, codebook_indices, h, mask
+        text, mask = self.text_encoder(text, valid_lens)              #[bs, l, d]  [8, 256, 256], mask在图像替换时使用
+        text = self.quant_linear(text).permute(1, 0, 2)
+        text = self.quant_tf(tgt=image_hidden, memory=text).permute(1, 0, 2)
+        text_quant, text_quant_loss, codebook_indices = self.quantize(text, key='text')     #quant: [8, 256, 256]
+        return text_quant, text_quant_loss, codebook_indices, text, mask
 
-    def text_decode(self, quant, valid_lens, text_hidden):             # [bs, l, d]  [8, 256, 256]
-        quant = quant.permute(1, 0, 2)                    # [l, bs, d]
-        # quant = self.post_quant_W(quant, attn_mask=None, valid_lens=valid_lens)
-        quant = self.post_quant_tf(quant)      # self-attention
-        quant = quant.permute(1, 2, 0)                    # [8, 256, 256], [bs, d, l]
-        quant = quant.reshape(quant.size(0), quant.size(1), 16, 16) # [8, 256, 16, 16]
+    def text_decode(self, text_quant, valid_lens):             # [bs, l, d]  [8, 256, 256]
+        text_quant = text_quant.permute(1, 0, 2)                    # [l, bs, d]
+        text_quant = self.post_quant_tf(text_quant)      # self-attention
+        text_quant = text_quant.permute(1, 2, 0)                    # [8, 256, 256], [bs, d, l]
+        b, d, l = text_quant.size()
+        text_quant = text_quant.reshape(b, d, 16, 16) # [8, 256, 16, 16]
 
         #文本->图像
-        t2i_rec, hidden = self.decoder(quant)
+        t2i_rec, text_hidden = self.decoder(text_quant)
         #文本->文本
-        t2t_rec = self.text_decoder(hidden, text_hidden)                              # [8, 256, 49408]
+        t2t_rec = self.text_decoder(text_hidden)                              # [8, 256, 49408]
 
         return t2t_rec, t2i_rec
     
     def forward(self, image, text, valid_lens):
-        image_quant, image_q_loss, _, image_hidden = self.encode(image)
-        text_quant,  text_q_loss, _, text_hidden, mask = self.text_encode(text, valid_lens, image_hidden)
+        image_quant, image_quant_loss, info, image_hidden = self.encode(image)
+        text_quant,  text_quant_loss, text_codebook_indices, text_hidden, mask = self.text_encode(text, valid_lens, image_hidden)
 
-        image_quant, text_quant, i_loss, t_loss = self.i_t_cluster(image_quant, text_quant, mask, valid_lens)           # [8, 256, 16, 16],  [8, 256, 256]
+        image_coquant, text_coquant, i_coquant_loss, t_coquant_loss = self.i_t_cluster(image_quant, text_quant, mask, valid_lens)           # [8, 256, 16, 16],  [8, 256, 256]
 
-        i2i_rec, i2t_rec = self.decode(image_quant, text_hidden)              # [8, 3, 256, 256],   [8, 256, 49408]
-        t2t_rec, t2i_rec  = self.text_decode(text_quant, valid_lens, text_hidden)        #不是整数, [8, 256, 49408],   [8, 3, 256, 256]
-        return i2i_rec, i2t_rec, image_q_loss,    t2t_rec, t2i_rec, text_q_loss,  i_loss, t_loss        # q_loss 是文本与图像相互替换时的损失
+        i2i_rec, i2t_rec = self.decode(image_coquant)              # [8, 3, 256, 256],   [8, 256, 49408]
+        t2t_rec, t2i_rec  = self.text_decode(text_quant, valid_lens)        #不是整数, [8, 256, 49408],   [8, 3, 256, 256]
+        return i2i_rec, i2t_rec, image_quant_loss, t2t_rec, t2i_rec, text_quant_loss,  i_coquant_loss, t_coquant_loss        # q_loss 是文本与图像相互替换时的损失
 
     def get_input(self, batch, k):
         image = batch['image']                                #[8, 256, 256, 3]
@@ -241,11 +241,11 @@ class VQModel(pl.LightningModule):
 
     def training_step(self, batch, batch_idx, optimizer_idx):
         image, text, valid_lens = self.get_input(batch, self.image_key)
-        i2i_rec, i2t_rec, image_q_loss, t2t_rec, t2i_rec, text_q_loss, i_loss, t_loss = self(image, text, valid_lens)
+        i2i_rec, i2t_rec, image_quant_loss, t2t_rec, t2i_rec, text_quant_loss, i_coquant_loss, t_coquant_loss = self(image, text, valid_lens)
 
         if optimizer_idx == 0:
             # autoencode
-            loss, log_dict = self.loss(image_q_loss, image, i2i_rec, i2t_rec, optimizer_idx, self.global_step, text, t2i_rec, t2t_rec, text_q_loss, valid_lens, i_loss, t_loss,   #返回loss和日志形式的字典
+            loss, log_dict = self.loss(image_quant_loss, image, i2i_rec, i2t_rec, optimizer_idx, self.global_step, text, t2i_rec, t2t_rec, text_quant_loss, valid_lens, i_coquant_loss, t_coquant_loss,   #返回loss和日志形式的字典
                                             last_layer=self.get_last_layer(), split="train")
 
             self.log("train/loss", loss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
@@ -254,7 +254,7 @@ class VQModel(pl.LightningModule):
 
         if optimizer_idx == 1:
             # discriminator
-            discloss, log_dict_disc = self.loss(image_q_loss, image, i2i_rec, i2t_rec, optimizer_idx, self.global_step, text, t2i_rec, t2t_rec, text_q_loss, valid_lens, i_loss, t_loss, 
+            discloss, log_dict_disc = self.loss(image_quant_loss, image, i2i_rec, i2t_rec, optimizer_idx, self.global_step, text, t2i_rec, t2t_rec, text_quant_loss, valid_lens, i_coquant_loss, t_coquant_loss, 
                                             last_layer=self.get_last_layer(), split="train")
             self.log("train/discloss", discloss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
             self.log_dict(log_dict_disc, prog_bar=False, logger=True, on_step=True, on_epoch=True)
@@ -262,12 +262,12 @@ class VQModel(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         image, text, valid_lens = self.get_input(batch, self.image_key) #torch.Size([3, 3, 256, 256]), torch.Size([3, 1, 77])
-        i2i_rec, i2t_rec, image_q_loss, t2t_rec, t2i_rec, text_q_loss, i_loss, t_loss  = self(image, text, valid_lens)                           #AE重构图，codebook损失
+        i2i_rec, i2t_rec, image_quant_loss, t2t_rec, t2i_rec, text_quant_loss, i_coquant_loss, t_coquant_loss = self(image, text, valid_lens)                           #AE重构图，codebook损失
 
-        loss, log_dict = self.loss(image_q_loss, image, i2i_rec, i2t_rec, 0, self.global_step, text, t2i_rec, t2t_rec, text_q_loss, valid_lens, i_loss, t_loss,       #生成器的验证损失，以及字典形式的损失日志
+        loss, log_dict = self.loss(image_quant_loss, image, i2i_rec, i2t_rec, 0, self.global_step, text, t2i_rec, t2t_rec, text_quant_loss, valid_lens, i_coquant_loss, t_coquant_loss,       #生成器的验证损失，以及字典形式的损失日志
                                             last_layer=self.get_last_layer(), split="val")
 
-        discloss, log_dict_disc = self.loss(image_q_loss, image, i2i_rec, i2t_rec, 1, self.global_step, text, t2i_rec, t2t_rec, text_q_loss, valid_lens, i_loss, t_loss,  #判别器的验证损失日志
+        discloss, log_dict_disc = self.loss(image_quant_loss, image, i2i_rec, i2t_rec, 1, self.global_step, text, t2i_rec, t2t_rec, text_quant_loss, valid_lens, i_coquant_loss, t_coquant_loss,  #判别器的验证损失日志
                                             last_layer=self.get_last_layer(), split="val")
         
         #log：像是TensorBoard等log记录器，对于每个log的标量，都会有一个相对应的横坐标，它可能是batch number或epoch number
@@ -343,8 +343,8 @@ class VQModel(pl.LightningModule):
         ###
         image_quant2, _, _, image_hidden = self.encode(image)
         text_quant2, _, _, text_hidden, _ = self.text_encode(text, valid_lens, image_hidden)
-        i2i_no_cq_rec, _ = self.decode(image_quant2, text_hidden)
-        _, t2i_no_cq_rec = self.text_decode(text_quant2, valid_lens, text_hidden)
+        i2i_no_cq_rec, _ = self.decode(image_quant2)
+        _, t2i_no_cq_rec = self.text_decode(text_quant2, valid_lens)
         ###
         if image.shape[1] > 3:
             # colorize with random projection
@@ -375,251 +375,3 @@ class VQModel(pl.LightningModule):
         log['t2i_no_cq_rec'] = t2i_no_cq_rec
         ###        
         return log
-
-
-class VQSegmentationModel(VQModel):
-    def __init__(self, n_labels, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.register_buffer("colorize", torch.randn(3, n_labels, 1, 1))
-
-    def configure_optimizers(self):
-        lr = self.learning_rate
-        opt_ae = torch.optim.Adam(list(self.encoder.parameters())+
-                                  list(self.decoder.parameters())+
-                                  list(self.quantize.parameters())+
-                                  list(self.quant_conv.parameters())+
-                                  list(self.post_quant_conv.parameters()),
-                                  lr=lr, betas=(0.5, 0.9))
-        return opt_ae
-
-    def training_step(self, batch, batch_idx):
-        x = self.get_input(batch, self.image_key)
-        xrec, qloss = self(x)
-        aeloss, log_dict_ae = self.loss(qloss, x, xrec, split="train")
-        self.log_dict(log_dict_ae, prog_bar=False, logger=True, on_step=True, on_epoch=True)
-        return aeloss
-
-    def validation_step(self, batch, batch_idx):
-        x = self.get_input(batch, self.image_key)
-        xrec, qloss = self(x)
-        aeloss, log_dict_ae = self.loss(qloss, x, xrec, split="val")
-        self.log_dict(log_dict_ae, prog_bar=False, logger=True, on_step=False, on_epoch=True)
-        total_loss = log_dict_ae["val/total_loss"]
-        self.log("val/total_loss", total_loss,
-                 prog_bar=True, logger=True, on_step=False, on_epoch=True, sync_dist=True)
-        return aeloss
-
-    @torch.no_grad()
-    def log_images(self, batch, **kwargs):
-        log = dict()
-        x = self.get_input(batch, self.image_key)
-        x = x.to(self.device)
-        xrec, _ = self(x)
-        if x.shape[1] > 3:
-            # colorize with random projection
-            assert xrec.shape[1] > 3
-            # convert logits to indices
-            xrec = torch.argmax(xrec, dim=1, keepdim=True)
-            xrec = F.one_hot(xrec, num_classes=x.shape[1])
-            xrec = xrec.squeeze(1).permute(0, 3, 1, 2).float()
-            x = self.to_rgb(x)
-            xrec = self.to_rgb(xrec)
-        log["inputs"] = x
-        log["reconstructions"] = xrec
-        return log
-
-
-class VQNoDiscModel(VQModel):
-    def __init__(self,
-                 ddconfig,
-                 lossconfig,
-                 n_embed,
-                 embed_dim,
-                 ckpt_path=None,
-                 ignore_keys=[],
-                 image_key="image",
-                 colorize_nlabels=None
-                 ):
-        super().__init__(ddconfig=ddconfig, lossconfig=lossconfig, n_embed=n_embed, embed_dim=embed_dim,
-                         ckpt_path=ckpt_path, ignore_keys=ignore_keys, image_key=image_key,
-                         colorize_nlabels=colorize_nlabels)
-
-    def training_step(self, batch, batch_idx):
-        x = self.get_input(batch, self.image_key)
-        xrec, qloss = self(x)
-        # autoencode
-        aeloss, log_dict_ae = self.loss(qloss, x, xrec, self.global_step, split="train")
-        output = pl.TrainResult(minimize=aeloss)
-        output.log("train/aeloss", aeloss,
-                   prog_bar=True, logger=True, on_step=True, on_epoch=True)
-        output.log_dict(log_dict_ae, prog_bar=False, logger=True, on_step=True, on_epoch=True)
-        return output
-
-    def validation_step(self, batch, batch_idx):
-        x = self.get_input(batch, self.image_key)
-        xrec, qloss = self(x)
-        aeloss, log_dict_ae = self.loss(qloss, x, xrec, self.global_step, split="val")
-        rec_loss = log_dict_ae["val/rec_loss"]
-        output = pl.EvalResult(checkpoint_on=rec_loss)
-        output.log("val/rec_loss", rec_loss,
-                   prog_bar=True, logger=True, on_step=True, on_epoch=True)
-        output.log("val/aeloss", aeloss,
-                   prog_bar=True, logger=True, on_step=True, on_epoch=True)
-        output.log_dict(log_dict_ae)
-
-        return output
-
-    def configure_optimizers(self):
-        optimizer = torch.optim.Adam(list(self.encoder.parameters())+
-                                  list(self.decoder.parameters())+
-                                  list(self.quantize.parameters())+
-                                  list(self.quant_conv.parameters())+
-                                  list(self.post_quant_conv.parameters()),
-                                  lr=self.learning_rate, betas=(0.5, 0.9))
-        return optimizer
-
-
-class GumbelVQ(VQModel):
-    def __init__(self,
-                 ddconfig,
-                 lossconfig,
-                 n_embed,
-                 embed_dim,
-                 temperature_scheduler_config,
-                 ckpt_path=None,
-                 ignore_keys=[],
-                 image_key="image",
-                 colorize_nlabels=None,
-                 monitor=None,
-                 kl_weight=1e-8,
-                 remap=None,
-                 ):
-
-        z_channels = ddconfig["z_channels"]
-        super().__init__(ddconfig,
-                         lossconfig,
-                         n_embed,
-                         embed_dim,
-                         ckpt_path=None,
-                         ignore_keys=ignore_keys,
-                         image_key=image_key,
-                         colorize_nlabels=colorize_nlabels,
-                         monitor=monitor,
-                         )
-
-        self.loss.n_classes = n_embed
-        self.vocab_size = n_embed
-
-        self.quantize = GumbelQuantize(z_channels, embed_dim,
-                                       n_embed=n_embed,
-                                       kl_weight=kl_weight, temp_init=1.0,
-                                       remap=remap)
-
-        self.temperature_scheduler = instantiate_from_config(temperature_scheduler_config)   # annealing of temp
-
-        if ckpt_path is not None:
-            self.init_from_ckpt(ckpt_path, ignore_keys=ignore_keys)
-
-    def temperature_scheduling(self):
-        self.quantize.temperature = self.temperature_scheduler(self.global_step)
-
-    def encode_to_prequant(self, x):
-        h = self.encoder(x)
-        h = self.quant_conv(h)
-        return h
-
-    def decode_code(self, code_b):
-        raise NotImplementedError
-
-    def training_step(self, batch, batch_idx, optimizer_idx):
-        self.temperature_scheduling()
-        x = self.get_input(batch, self.image_key)
-        xrec, qloss = self(x)
-
-        if optimizer_idx == 0:
-            # autoencode
-            aeloss, log_dict_ae = self.loss(qloss, x, xrec, optimizer_idx, self.global_step,
-                                            last_layer=self.get_last_layer(), split="train")
-
-            self.log_dict(log_dict_ae, prog_bar=False, logger=True, on_step=True, on_epoch=True)
-            self.log("temperature", self.quantize.temperature, prog_bar=False, logger=True, on_step=True, on_epoch=True)
-            return aeloss
-
-        if optimizer_idx == 1:
-            # discriminator
-            discloss, log_dict_disc = self.loss(qloss, x, xrec, optimizer_idx, self.global_step,
-                                            last_layer=self.get_last_layer(), split="train")
-            self.log_dict(log_dict_disc, prog_bar=False, logger=True, on_step=True, on_epoch=True)
-            return discloss
-
-    def validation_step(self, batch, batch_idx):
-        x = self.get_input(batch, self.image_key)
-        xrec, qloss = self(x, return_pred_indices=True)
-        aeloss, log_dict_ae = self.loss(qloss, x, xrec, 0, self.global_step,
-                                        last_layer=self.get_last_layer(), split="val")
-
-        discloss, log_dict_disc = self.loss(qloss, x, xrec, 1, self.global_step,
-                                            last_layer=self.get_last_layer(), split="val")
-        rec_loss = log_dict_ae["val/rec_loss"]
-        self.log("val/rec_loss", rec_loss,
-                 prog_bar=True, logger=True, on_step=False, on_epoch=True, sync_dist=True)
-        self.log("val/aeloss", aeloss,
-                 prog_bar=True, logger=True, on_step=False, on_epoch=True, sync_dist=True)
-        self.log_dict(log_dict_ae)
-        self.log_dict(log_dict_disc)
-        return self.log_dict
-
-    def log_images(self, batch, **kwargs):
-        log = dict()
-        x = self.get_input(batch, self.image_key)
-        x = x.to(self.device)
-        # encode
-        h = self.encoder(x)
-        h = self.quant_conv(h)
-        quant, _, _ = self.quantize(h)
-        # decode
-        x_rec = self.decode(quant)
-        log["inputs"] = x
-        log["reconstructions"] = x_rec
-        return log
-
-
-class EMAVQ(VQModel):
-    def __init__(self,
-                 ddconfig,
-                 lossconfig,
-                 n_embed,
-                 embed_dim,
-                 ckpt_path=None,
-                 ignore_keys=[],
-                 image_key="image",
-                 colorize_nlabels=None,
-                 monitor=None,
-                 remap=None,
-                 sane_index_shape=False,  # tell vector quantizer to return indices as bhw
-                 ):
-        super().__init__(ddconfig,
-                         lossconfig,
-                         n_embed,
-                         embed_dim,
-                         ckpt_path=None,
-                         ignore_keys=ignore_keys,
-                         image_key=image_key,
-                         colorize_nlabels=colorize_nlabels,
-                         monitor=monitor,
-                         )
-        self.quantize = EMAVectorQuantizer(n_embed=n_embed,
-                                           embedding_dim=embed_dim,
-                                           beta=0.25,
-                                           remap=remap)
-    def configure_optimizers(self):
-        lr = self.learning_rate
-        #Remove self.quantize from parameter list since it is updated via EMA
-        opt_ae = torch.optim.Adam(list(self.encoder.parameters())+
-                                  list(self.decoder.parameters())+
-                                  list(self.quant_conv.parameters())+
-                                  list(self.post_quant_conv.parameters()),
-                                  lr=lr, betas=(0.5, 0.9))
-        opt_disc = torch.optim.Adam(self.loss.discriminator.parameters(),
-                                    lr=lr, betas=(0.5, 0.9))
-        return [opt_ae, opt_disc], []                                           
