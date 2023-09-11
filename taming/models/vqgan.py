@@ -22,6 +22,7 @@ from taming.data.base import tokenize
 from taming.modules.tokenizer.simple_tokenizer import SimpleTokenizer as _Tokenizer
 from torch.optim.lr_scheduler import StepLR
 import os
+from open_clip.src.open_clip.factory import create_model_and_transforms
 
 def download_pretrained_from_url(
         url: str,
@@ -122,7 +123,9 @@ class VQModel(pl.LightningModule):
         super().__init__()
         # 图像侧
         self.image_key = image_key
-        self.encoder = Encoder(**ddconfig)
+        self.clip, preprocess_train, preprocess_val = create_model_and_transforms(
+            'ViT-B-32', pretrained='laion400m_e32', output_dict=True)
+        # self.encoder = Encoder(**ddconfig)
         self.decoder = Decoder(**ddconfig)  # 图像与文本侧解码器部分共用
         self.loss = instantiate_from_config(lossconfig)
         self.quantize = VectorQuantizer(n_embed, embed_dim, beta=0.25,
@@ -131,18 +134,14 @@ class VQModel(pl.LightningModule):
         self.post_quant_conv = torch.nn.Conv2d(embed_dim, ddconfig["z_channels"], 1)
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path, ignore_keys=ignore_keys)
-        self.image_key = image_key
-        if colorize_nlabels is not None:
-            assert type(colorize_nlabels)==int
-            self.register_buffer("colorize", torch.randn(3, colorize_nlabels, 1, 1))
         # 文本侧
-        self.text_encoder = TextTransformer(**ctconfig)
+        # self.text_encoder = TextTransformer(**ctconfig)
         self.text_decoder = Text_Decoder(ctconfig["vocab_size"])  # 图像与文本侧解码器部分共用
         self.quant_linear = nn.Linear(ctconfig["width"], embed_dim)       # 从文本侧的宽度映射到coodbook的宽度
         self.quant_tf = nn.TransformerDecoder(nn.TransformerDecoderLayer(d_model=256, nhead=8), num_layers=6)
         self.post_quant_tf = nn.TransformerEncoder(nn.TransformerEncoderLayer(d_model=256, nhead=8), num_layers=2)
-        if ct_ckpt_dir is not None:
-            self.init_from_ct_ckpt(ct_ckpt_dir, self.text_encoder, ctconfig["context_length"], ignore_keys=ignore_keys)
+        # if ct_ckpt_dir is not None:
+        #     self.init_from_ct_ckpt(ct_ckpt_dir, self.text_encoder, ctconfig["context_length"], ignore_keys=ignore_keys)
         #图像与文本交叉量化
         self.i_t_cluster = Cluster(embed_dim)
 
@@ -227,20 +226,15 @@ class VQModel(pl.LightningModule):
         t2t_rec, t2i_rec  = self.text_decode(text_quant, valid_lens)        #不是整数, [8, 256, 49408],   [8, 3, 256, 256]
         return i2i_rec, i2t_rec, image_quant_loss, t2t_rec, t2i_rec, text_quant_loss,  i_coquant_loss, t_coquant_loss        # q_loss 是文本与图像相互替换时的损失
 
-    def get_input(self, batch, k):
-        image = batch['image']                                #[8, 256, 256, 3]
-        text, valid_lens = tokenize(list(batch['caption'][0]), context_length=256)  #[8, 1, 256]
-        text = text.to(image.device)
-        valid_lens = valid_lens.to(image.device)
-        if len(text.shape) == 3:
-            text = torch.squeeze(text, 1)
-        if len(image.shape) == 3:
-            image = image[..., None]
-        image = image.permute(0, 3, 1, 2).to(memory_format=torch.contiguous_format)
-        return image.float(), text, valid_lens                            #[8, 3, 256, 256], [8, 256]
 
     def training_step(self, batch, batch_idx, optimizer_idx):
-        image, text, valid_lens = self.get_input(batch, self.image_key)
+        images, texts = batch
+        images = images.to(device=device, non_blocking=True)
+        texts = texts.to(device=device, non_blocking=True)
+        clip_out = self.clip(images, texts)
+        image_features = clip_out["image_features"]
+        text_features = clip_out["text_features"]
+
         i2i_rec, i2t_rec, image_quant_loss, t2t_rec, t2i_rec, text_quant_loss, i_coquant_loss, t_coquant_loss = self(image, text, valid_lens)
 
         if optimizer_idx == 0:
@@ -261,7 +255,13 @@ class VQModel(pl.LightningModule):
             return discloss
 
     def validation_step(self, batch, batch_idx):
-        image, text, valid_lens = self.get_input(batch, self.image_key) #torch.Size([3, 3, 256, 256]), torch.Size([3, 1, 77])
+        images, texts = batch
+        images = images.to(device=self.device, non_blocking=True)
+        texts = texts.to(device=self.device, non_blocking=True)
+        clip_out = self.clip(images, texts)
+        image_features = clip_out["image_features"]     # [4, 49, 768]
+        text_features = clip_out["text_features"]       # [4, 77, 512]
+
         i2i_rec, i2t_rec, image_quant_loss, t2t_rec, t2i_rec, text_quant_loss, i_coquant_loss, t_coquant_loss = self(image, text, valid_lens)                           #AE重构图，codebook损失
 
         loss, log_dict = self.loss(image_quant_loss, image, i2i_rec, i2t_rec, 0, self.global_step, text, t2i_rec, t2t_rec, text_quant_loss, valid_lens, i_coquant_loss, t_coquant_loss,       #生成器的验证损失，以及字典形式的损失日志
