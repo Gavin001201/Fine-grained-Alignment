@@ -1,4 +1,4 @@
-name: taming
+name: taming2
 channels:
   - pytorch
   - defaults

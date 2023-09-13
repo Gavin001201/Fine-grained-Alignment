@@ -2,9 +2,7 @@ model:
   base_learning_rate: 4.5e-6
   target: taming.models.vqgan.VQModel
   params:
-    ckpt_path: /mnt/workspace/Project/Fine-grained-Alignment/logs/coco_ckpt/coco_epoch117.ckpt
-    ct_ckpt_dir: /mnt/workspace/Project/Fine-grained-Alignment/logs/ct_ckpt_path/clip
-    embed_dim: 256
+    embed_dim: 512
     n_embed: 8192
     ddconfig:
       double_z: False
