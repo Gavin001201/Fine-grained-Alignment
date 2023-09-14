@@ -326,7 +326,7 @@ class VectorQuantizer2(nn.Module):          #VectorQuantizer 改进的版本
 
         return z_q
 
-class Cluster(nn.Module):
+class Coquant(nn.Module):
     def __init__(self,embed_dim):
         super().__init__()
         self.latent_dim = embed_dim
@@ -334,7 +334,7 @@ class Cluster(nn.Module):
     def forward(self, image_quant, text_quant, mask=None, valid_lens=None):
         text_quant = text_quant[:, :49]
         num = image_quant.size(0) if len(image_quant.size())==3 else 1
-        image_quant_flattened = image_quant.contiguous()              # [8, 16, 16, 256]
+        image_quant_flattened = image_quant.contiguous()      # 没有展平是因为只在单个图文对计算
         text_quant_flattened = text_quant.contiguous()
 
         image_quant2 = torch.zeros_like(image_quant_flattened)
@@ -370,8 +370,6 @@ class Cluster(nn.Module):
 
         image_coquant = image_quant + (image_quant2 - image_quant).detach()
         text_coquant = text_quant + (text_quant2 - text_quant).detach()
-
-        image_coquant = image_coquant.permute(0, 3, 1, 2).contiguous()                         #[8, 256, 16, 16]        
 
         return image_coquant, text_coquant, i_coquant_loss, t_coquant_loss
     

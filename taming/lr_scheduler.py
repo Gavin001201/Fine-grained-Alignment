@@ -5,7 +5,8 @@ class LambdaWarmUpCosineScheduler:
     """
     note: use with a base_lr of 1.0
     """
-    def __init__(self, warm_up_steps, lr_min, lr_max, lr_start, max_decay_steps, verbosity_interval=0):
+    def __init__(self, warm_up_steps=None, lr_min=None, lr_max=None, 
+        lr_start=None, max_decay_steps=None, verbosity_interval=0):
         self.lr_warm_up_steps = warm_up_steps
         self.lr_start = lr_start
         self.lr_min = lr_min
